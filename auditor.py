@@ -11,44 +11,42 @@ from langchain.prompts import PromptTemplate
 # Configuração da Página
 st.set_page_config(page_title="LicitaGov - Auditor IA", page_icon="⚖️", layout="wide")
 
-# --- FUNÇÃO QUE LÊ OS PDFS AUTOMATICAMENTE ---
+# --- FUNÇÃO QUE LÊ OS PDFS (MODO FAREJADOR) ---
 @st.cache_resource(show_spinner=False)
 def load_knowledge_base():
     text = ""
     data_folder = "data"
-    subfolders = ["legislacao", "tcu_informativos", "tce_es_informativos", "doutrina_manuais"]
     files_processed = 0
-    debug_log = [] # Lista para guardar os nomes dos arquivos encontrados
+    debug_log = [] 
     
     if not os.path.exists(data_folder):
         return None, 0, ["ERRO: Pasta 'data' não encontrada na raiz."]
 
-    # Varre as pastas e lê os PDFs
-    for sub in subfolders:
-        path = os.path.join(data_folder, sub)
-        if os.path.exists(path):
-            for filename in os.listdir(path):
-                # CORREÇÃO: .lower() para ler .PDF maiúsculo também
-                if filename.lower().endswith('.pdf'):
-                    filepath = os.path.join(path, filename)
-                    try:
-                        pdf_reader = PdfReader(filepath)
-                        file_text = ""
-                        for page in pdf_reader.pages:
-                            page_text = page.extract_text()
-                            if page_text:
-                                file_text += page_text
-                        
-                        if file_text:
-                            text += file_text
-                            files_processed += 1
-                            debug_log.append(f"✅ Lido: {sub}/{filename}")
-                        else:
-                            debug_log.append(f"⚠️ Vazio/Imagem: {sub}/{filename}")
-                    except Exception as e:
-                        debug_log.append(f"❌ Erro ao ler {filename}: {str(e)}")
-        else:
-            debug_log.append(f"⚠️ Pasta não encontrada: {sub}")
+    # MUDANÇA: O os.walk entra em todas as subpastas recursivamente
+    # Não importa se você jogou a pasta do TCE dentro da Legislacao, ele vai achar.
+    for root, dirs, files in os.walk(data_folder):
+        for filename in files:
+            # Lê .pdf, .PDF e até .pdf.pdf
+            if filename.lower().endswith('.pdf'):
+                filepath = os.path.join(root, filename)
+                try:
+                    pdf_reader = PdfReader(filepath)
+                    file_text = ""
+                    for page in pdf_reader.pages:
+                        page_text = page.extract_text()
+                        if page_text:
+                            file_text += page_text
+                    
+                    if file_text:
+                        text += file_text
+                        files_processed += 1
+                        # Mostra a pasta onde achou o arquivo para você conferir
+                        folder_name = os.path.basename(root)
+                        debug_log.append(f"✅ Lido ({folder_name}): {filename}")
+                    else:
+                        debug_log.append(f"⚠️ Arquivo Vazio/Imagem: {filename}")
+                except Exception as e:
+                    debug_log.append(f"❌ Erro ao ler {filename}: {str(e)}")
     
     if text == "":
         return None, 0, debug_log
@@ -123,19 +121,20 @@ def main():
                 st.error("Senha Errada")
     
     if st.session_state.get('logged'):
-        with st.spinner("Inicializando Base Jurídica..."):
-            # Agora a função retorna também o LOG (lista do que aconteceu)
+        with st.spinner("Inicializando Base Jurídica (Isso pode demorar 1 min)..."):
             vectorstore, qtd, logs = load_knowledge_base()
         
-        # MOSTRAR LOGS SE DER ERRO (Debug)
-        if qtd == 0:
-            st.error("⚠️ Nenhum PDF foi processado. Veja o relatório abaixo:")
-            with st.expander("Ver Relatório de Arquivos (Debug)"):
+        # DEBUG: Mostra o que foi lido se clicar no botão
+        if qtd > 0:
+            with st.expander(f"✅ Base Carregada: {qtd} arquivos. Clique para ver detalhes."):
                 for log in logs:
                     st.write(log)
+        else:
+            st.error("⚠️ Nenhum PDF encontrado. Veja o relatório:")
+            for log in logs:
+                st.write(log)
         
         if vectorstore:
-            st.success(f"Base Carregada: {qtd} arquivos lidos com sucesso.")
             uploaded_file = st.file_uploader("Arraste o Edital (PDF) aqui", type="pdf")
             
             if uploaded_file and st.button("Auditar Agora"):
