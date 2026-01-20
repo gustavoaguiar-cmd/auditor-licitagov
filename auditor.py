@@ -63,6 +63,8 @@ def load_knowledge_base():
 # --- 2. CÉREBRO ESPECIALISTA ---
 def get_specialized_chain(doc_type):
     
+    # Adicionei a instrução: "NÃO COLOQUE ASSINATURA" em todos os prompts
+    
     if doc_type == "EDITAL":
         prompt_template = """
         Você é um Auditor Especialista em Licitações e Jurisprudência (TCU/TCE).
@@ -73,8 +75,9 @@ def get_specialized_chain(doc_type):
         
         DIRETRIZES OBRIGATÓRIAS:
         1. Se encontrar irregularidade, cite o Artigo da Lei.
-        2. CITE A FONTE JURISPRUDENCIAL se houver no contexto (Ex: "Conforme Acórdão TCU nº X", "Segundo Súmula Y").
+        2. CITE A FONTE JURISPRUDENCIAL se houver no contexto.
         3. Seja técnico e direto.
+        4. NÃO COLOQUE ASSINATURA, NOME OU ESPAÇO PARA ASSINAR NO FINAL. TERMINE COM O PARECER.
         
         Contexto: {context}
         PARECER TÉCNICO:
@@ -90,6 +93,7 @@ def get_specialized_chain(doc_type):
         DIRETRIZES:
         - Verifique os incisos do Art. 18.
         - Se o texto contrariar algum entendimento consolidado, aponte a divergência.
+        - NÃO COLOQUE ASSINATURA NO FINAL.
         
         Contexto: {context}
         PARECER SOBRE O ETP:
@@ -105,7 +109,7 @@ def get_specialized_chain(doc_type):
         DIRETRIZES:
         - Valide a definição do objeto (Art. 6º, XXIII).
         - Verifique se há restrição indevida.
-        - Use a jurisprudência fornecida para embasar.
+        - NÃO COLOQUE ASSINATURA NO FINAL.
         
         Contexto: {context}
         PARECER SOBRE O TR:
@@ -129,8 +133,10 @@ def check_login(key):
     }
     return users.get(key, -1)
 
-# --- 4. FUNÇÃO QUE RODA A ANÁLISE ---
-def run_analysis(vectorstore, uploaded_file, doc_type, questions):
+# --- 4. FUNÇÃO QUE RODA A ANÁLISE (MODIFICADA PARA TÍTULOS) ---
+def run_analysis(vectorstore, uploaded_file, doc_type, questions_list):
+    # questions_list agora recebe tuplas: ("Título Bonito", "Prompt Técnico")
+    
     reader = PdfReader(uploaded_file)
     doc_text = ""
     for page in reader.pages:
@@ -138,24 +144,23 @@ def run_analysis(vectorstore, uploaded_file, doc_type, questions):
     
     chain = get_specialized_chain(doc_type)
     
-    # Título discreto no relatório
     st.markdown(f"### 📋 Resultado da Análise ({doc_type})")
     progress_bar = st.progress(0)
     
-    for i, q in enumerate(questions):
-        docs = vectorstore.similarity_search(q)
-        resp = chain.run(input_documents=docs, question=f"Texto do Documento: {doc_text[:6000]}... TAREFA: {q}")
+    for i, (titulo_bonito, prompt_tecnico) in enumerate(questions_list):
+        docs = vectorstore.similarity_search(prompt_tecnico)
+        resp = chain.run(input_documents=docs, question=f"Texto do Documento: {doc_text[:6000]}... TAREFA: {prompt_tecnico}")
         
         with st.chat_message("assistant"):
-            # Aqui mantemos a pergunta visível APENAS no relatório final
-            st.markdown(f"**Item Analisado:** {q}")
+            # Agora mostra o Título Bonito e não a pergunta inteira
+            st.markdown(f"**{titulo_bonito}**")
             st.write(resp)
         
-        progress_bar.progress((i + 1) / len(questions))
+        progress_bar.progress((i + 1) / len(questions_list))
     
     st.success(f"✅ Análise Finalizada.")
 
-# --- 5. TELA PRINCIPAL (LIMPA/BLACK BOX) ---
+# --- 5. TELA PRINCIPAL ---
 def main():
     st.title("🏛️ AguiarGov - Auditor IA")
     st.markdown("---")
@@ -181,18 +186,17 @@ def main():
                 for log in logs: st.write(log)
         
         if vectorstore:
-            # --- ABAS LIMPAS (SEM EXPLICAÇÃO TÉCNICA) ---
             tab1, tab2, tab3 = st.tabs(["📄 EDITAL", "📘 ETP", "📋 TR / P. BÁSICO"])
             
             # --- ABA 1: EDITAL ---
             with tab1:
-                # Sem st.info explicando o que faz
                 file_edital = st.file_uploader("Selecione o arquivo PDF do Edital", type="pdf", key="u1")
                 if file_edital and st.button("AUDITAR ARQUIVO (1 Crédito)", key="b1"):
+                    # Lista de Tuplas: (Título que aparece na tela, Pergunta pro Robô)
                     questions = [
-                        "Verifique a MODALIDADE e o CRITÉRIO DE JULGAMENTO. Estão adequados ao objeto? (Art. 28 e 33)",
-                        "Analise os REQUISITOS DE HABILITAÇÃO (Jurídica, Fiscal, Técnica, Econômica). Há excessos ou restrições? (Art. 62 a 70)",
-                        "Verifique os PRAZOS DE PUBLICAÇÃO e de IMPUGNAÇÃO. Estão corretos? (Art. 55 e 164)"
+                        ("1. Análise de Modalidade e Critério", "Verifique a MODALIDADE e o CRITÉRIO DE JULGAMENTO. Estão adequados ao objeto? (Art. 28 e 33)"),
+                        ("2. Análise de Habilitação", "Analise os REQUISITOS DE HABILITAÇÃO (Jurídica, Fiscal, Técnica, Econômica). Há excessos ou restrições? (Art. 62 a 70)"),
+                        ("3. Prazos e Publicidade", "Verifique os PRAZOS DE PUBLICAÇÃO e de IMPUGNAÇÃO. Estão corretos? (Art. 55 e 164)")
                     ]
                     run_analysis(vectorstore, file_edital, "EDITAL", questions)
 
@@ -201,10 +205,10 @@ def main():
                 file_etp = st.file_uploader("Selecione o arquivo PDF do ETP", type="pdf", key="u2")
                 if file_etp and st.button("AUDITAR ARQUIVO (1 Crédito)", key="b2"):
                     questions = [
-                        "O ETP descreve a NECESSIDADE da contratação de forma clara? (Inciso I)",
-                        "Houve LEVANTAMENTO DE MERCADO e análise de alternativas? (Inciso III)",
-                        "Há ESTIMATIVA DO VALOR e adequação orçamentária? (Inciso VI e VII)",
-                        "A ESCOLHA DA SOLUÇÃO foi justificada técnica e economicamente? (Inciso VIII)"
+                        ("1. Análise da Necessidade", "O ETP descreve a NECESSIDADE da contratação de forma clara? (Inciso I)"),
+                        ("2. Levantamento de Mercado", "Houve LEVANTAMENTO DE MERCADO e análise de alternativas? (Inciso III)"),
+                        ("3. Estimativa e Orçamento", "Há ESTIMATIVA DO VALOR e adequação orçamentária? (Inciso VI e VII)"),
+                        ("4. Justificativa da Solução", "A ESCOLHA DA SOLUÇÃO foi justificada técnica e economicamente? (Inciso VIII)")
                     ]
                     run_analysis(vectorstore, file_etp, "ETP", questions)
 
@@ -213,10 +217,10 @@ def main():
                 file_tr = st.file_uploader("Selecione o arquivo PDF do TR", type="pdf", key="u3")
                 if file_tr and st.button("AUDITAR ARQUIVO (1 Crédito)", key="b3"):
                     questions = [
-                        "A definição do OBJETO é precisa, suficiente e clara? Há vedação de marca? (Inciso XXIII, 'a')",
-                        "O MODELO DE EXECUÇÃO do objeto está claro? (Inciso XXIII, 'e')",
-                        "Os CRITÉRIOS DE MEDIÇÃO E PAGAMENTO estão definidos objetivamente? (Inciso XXIII, 'h')",
-                        "Há previsão de FISCALIZAÇÃO e critérios de recebimento? (Inciso XXIII, 'g')"
+                        ("1. Definição do Objeto", "A definição do OBJETO é precisa, suficiente e clara? Há vedação de marca? (Inciso XXIII, 'a')"),
+                        ("2. Modelo de Execução", "O MODELO DE EXECUÇÃO do objeto está claro? (Inciso XXIII, 'e')"),
+                        ("3. Medição e Pagamento", "Os CRITÉRIOS DE MEDIÇÃO E PAGAMENTO estão definidos objetivamente? (Inciso XXIII, 'h')"),
+                        ("4. Fiscalização", "Há previsão de FISCALIZAÇÃO e critérios de recebimento? (Inciso XXIII, 'g')")
                     ]
                     run_analysis(vectorstore, file_tr, "TR", questions)
 
