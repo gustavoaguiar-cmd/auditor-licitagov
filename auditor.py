@@ -1,7 +1,7 @@
 import streamlit as st
 import os
 from PyPDF2 import PdfReader
-# VOLTAMOS PARA O IMPORT CLÁSSICO (Funciona na v0.1.20)
+# VERSÃO ESTÁVEL LANGCHAIN 0.1
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
@@ -16,32 +16,42 @@ st.set_page_config(page_title="LicitaGov - Auditor IA", page_icon="⚖️", layo
 def load_knowledge_base():
     text = ""
     data_folder = "data"
-    
     subfolders = ["legislacao", "tcu_informativos", "tce_es_informativos", "doutrina_manuais"]
     files_processed = 0
+    debug_log = [] # Lista para guardar os nomes dos arquivos encontrados
     
     if not os.path.exists(data_folder):
-        return None, 0
+        return None, 0, ["ERRO: Pasta 'data' não encontrada na raiz."]
 
     # Varre as pastas e lê os PDFs
     for sub in subfolders:
         path = os.path.join(data_folder, sub)
         if os.path.exists(path):
             for filename in os.listdir(path):
-                if filename.endswith('.pdf'):
+                # CORREÇÃO: .lower() para ler .PDF maiúsculo também
+                if filename.lower().endswith('.pdf'):
                     filepath = os.path.join(path, filename)
                     try:
                         pdf_reader = PdfReader(filepath)
+                        file_text = ""
                         for page in pdf_reader.pages:
                             page_text = page.extract_text()
                             if page_text:
-                                text += page_text
-                        files_processed += 1
-                    except:
-                        continue 
+                                file_text += page_text
+                        
+                        if file_text:
+                            text += file_text
+                            files_processed += 1
+                            debug_log.append(f"✅ Lido: {sub}/{filename}")
+                        else:
+                            debug_log.append(f"⚠️ Vazio/Imagem: {sub}/{filename}")
+                    except Exception as e:
+                        debug_log.append(f"❌ Erro ao ler {filename}: {str(e)}")
+        else:
+            debug_log.append(f"⚠️ Pasta não encontrada: {sub}")
     
     if text == "":
-        return None, 0
+        return None, 0, debug_log
 
     # Cria o "Cérebro"
     text_splitter = CharacterTextSplitter(separator="\n", chunk_size=1000, chunk_overlap=200, length_function=len)
@@ -54,13 +64,12 @@ def load_knowledge_base():
         api_key = os.getenv("OPENAI_API_KEY")
 
     if not api_key:
-        st.error("Chave da API não encontrada! Configure nos Secrets do Streamlit.")
-        return None, 0
+        return None, 0, ["ERRO CRÍTICO: Chave API não configurada."]
     
     embeddings = OpenAIEmbeddings(openai_api_key=api_key)
     vectorstore = FAISS.from_texts(texts=chunks, embedding=embeddings)
     
-    return vectorstore, files_processed
+    return vectorstore, files_processed, debug_log
 
 # --- CÉREBRO JURÍDICO ---
 def get_audit_chain():
@@ -68,15 +77,15 @@ def get_audit_chain():
     Você é um Auditor Jurídico Especialista em Licitações (Brasil).
     Analise o trecho do edital abaixo.
 
-    HIERARQUIA DE LEIS (Siga estritamente):
-    1. Obras: Aplique Dec. 7.983/13 e Lei 14.133.
-    2. Publicidade: Aplique Lei 12.232/10.
-    3. Geral: Aplique Lei 14.133/21.
+    HIERARQUIA DE LEIS:
+    1. Obras: Dec. 7.983/13 e Lei 14.133.
+    2. Publicidade: Lei 12.232/10.
+    3. Geral: Lei 14.133/21.
 
-    Se encontrar erro, cite o Artigo. Se estiver certo, diga "Nenhuma irregularidade".
+    Se encontrar erro, cite o Artigo.
     
-    Contexto Legal: {context}
-    Pergunta/Edital: {question}
+    Contexto: {context}
+    Pergunta: {question}
     
     Parecer:
     """
@@ -89,7 +98,7 @@ def get_audit_chain():
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
     return load_qa_chain(model, chain_type="stuff", prompt=prompt)
 
-# --- SENHAS DE ACESSO (Login) ---
+# --- LOGIN ---
 def check_login(key):
     users = {
         "AMIGO_TESTE": 3,
@@ -98,7 +107,7 @@ def check_login(key):
     }
     return users.get(key, -1)
 
-# --- TELA DO SISTEMA ---
+# --- TELA PRINCIPAL ---
 def main():
     st.title("🏛️ AguiarGov - Auditor IA")
     
@@ -114,14 +123,19 @@ def main():
                 st.error("Senha Errada")
     
     if st.session_state.get('logged'):
-        if not os.path.exists("data"):
-            st.warning("⚠️ Pasta 'data' não encontrada. O sistema vai rodar vazio.")
+        with st.spinner("Inicializando Base Jurídica..."):
+            # Agora a função retorna também o LOG (lista do que aconteceu)
+            vectorstore, qtd, logs = load_knowledge_base()
         
-        with st.spinner("Lendo PDFs e criando inteligência... (Isso pode demorar 1 min)"):
-            vectorstore, qtd = load_knowledge_base()
+        # MOSTRAR LOGS SE DER ERRO (Debug)
+        if qtd == 0:
+            st.error("⚠️ Nenhum PDF foi processado. Veja o relatório abaixo:")
+            with st.expander("Ver Relatório de Arquivos (Debug)"):
+                for log in logs:
+                    st.write(log)
         
         if vectorstore:
-            st.success(f"Base Carregada: {qtd} arquivos jurídicos lidos.")
+            st.success(f"Base Carregada: {qtd} arquivos lidos com sucesso.")
             uploaded_file = st.file_uploader("Arraste o Edital (PDF) aqui", type="pdf")
             
             if uploaded_file and st.button("Auditar Agora"):
@@ -144,8 +158,6 @@ def main():
                     st.markdown(f"#### 🧐 {q}")
                     st.write(resp)
                     st.write("---")
-        else:
-            st.warning("Nenhum PDF processado. Verifique se subiu os arquivos na pasta data.")
 
 if __name__ == "__main__":
     main()
