@@ -8,10 +8,10 @@ from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
 
-# Configuração da Página (Títulos e Ícone)
+# Configuração da Página
 st.set_page_config(page_title="LicitaGov - Auditor IA", page_icon="⚖️", layout="wide")
 
-# --- FUNÇÃO QUE LÊ OS PDFS (MODO SILENCIOSO) ---
+# --- 1. CARREGAMENTO DA BASE JURÍDICA (LEIS/JURISPRUDÊNCIA) ---
 @st.cache_resource(show_spinner=False)
 def load_knowledge_base():
     text = ""
@@ -20,8 +20,9 @@ def load_knowledge_base():
     debug_log = [] 
     
     if not os.path.exists(data_folder):
-        return None, 0, ["ERRO: Pasta 'data' não encontrada na raiz."]
+        return None, 0, ["ERRO: Pasta 'data' não encontrada."]
 
+    # MODO FAREJADOR: Entra em todas as subpastas (Legislacao, TCU, Sumulas, etc)
     for root, dirs, files in os.walk(data_folder):
         for filename in files:
             if filename.lower().endswith('.pdf'):
@@ -39,10 +40,8 @@ def load_knowledge_base():
                         files_processed += 1
                         folder_name = os.path.basename(root)
                         debug_log.append(f"✅ Lido ({folder_name}): {filename}")
-                    else:
-                        debug_log.append(f"⚠️ Arquivo Vazio/Imagem: {filename}")
-                except Exception as e:
-                    debug_log.append(f"❌ Erro ao ler {filename}: {str(e)}")
+                except Exception:
+                    continue
     
     if text == "":
         return None, 0, debug_log
@@ -50,37 +49,74 @@ def load_knowledge_base():
     text_splitter = CharacterTextSplitter(separator="\n", chunk_size=1000, chunk_overlap=200, length_function=len)
     chunks = text_splitter.split_text(text)
     
+    # Gestão de Senha Segura
     if "OPENAI_API_KEY" in st.secrets:
         api_key = st.secrets["OPENAI_API_KEY"]
     else:
         api_key = os.getenv("OPENAI_API_KEY")
 
     if not api_key:
-        return None, 0, ["ERRO CRÍTICO: Chave API não configurada."]
+        return None, 0, ["ERRO: Chave API ausente."]
     
     embeddings = OpenAIEmbeddings(openai_api_key=api_key)
     vectorstore = FAISS.from_texts(texts=chunks, embedding=embeddings)
-    
     return vectorstore, files_processed, debug_log
 
-# --- CÉREBRO JURÍDICO ---
-def get_audit_chain():
-    prompt_template = """
-    Você é um Auditor Jurídico Especialista em Licitações (Brasil).
-    Analise o trecho do edital abaixo.
-
-    HIERARQUIA DE LEIS:
-    1. Obras: Dec. 7.983/13 e Lei 14.133.
-    2. Publicidade: Lei 12.232/10.
-    3. Geral: Lei 14.133/21.
-
-    Se encontrar erro, cite o Artigo.
+# --- 2. CÉREBRO ESPECIALISTA (ATUALIZADO PARA CITAR FONTES) ---
+def get_specialized_chain(doc_type):
     
-    Contexto: {context}
-    Pergunta: {question}
-    
-    Parecer:
-    """
+    # Prompt para o EDITAL (Geral)
+    if doc_type == "EDITAL":
+        prompt_template = """
+        Você é um Auditor Especialista em Licitações e Jurisprudência (TCU/TCE).
+        Analise o texto do EDITAL fornecido.
+        
+        Sua missão é cruzar as exigências do edital com a LEI 14.133/21 e a JURISPRUDÊNCIA fornecida (Acórdãos, Súmulas, Manuais).
+        
+        FOCO DA ANÁLISE: {question}
+        
+        DIRETRIZES OBRIGATÓRIAS:
+        1. Se encontrar irregularidade, cite o Artigo da Lei.
+        2. CITE A FONTE JURISPRUDENCIAL se houver no contexto (Ex: "Conforme Acórdão TCU nº X", "Segundo Súmula Y", "Conforme Prejulgado TCE/ES Z").
+        3. Seja técnico e direto.
+        
+        Contexto (Leis e Jurisprudência encontradas): {context}
+        PARECER TÉCNICO:
+        """
+
+    # Prompt para o ETP (Art. 18)
+    elif doc_type == "ETP":
+        prompt_template = """
+        Você é um Auditor Focado em Planejamento.
+        Analise o ETP à luz do Art. 18 da Lei 14.133/21 e das orientações dos Manuais de Planejamento (TCU/TCE).
+        
+        FOCO DA ANÁLISE: {question}
+        
+        DIRETRIZES:
+        - Verifique os incisos do Art. 18 (Necessidade, Alternativas, Estimativa).
+        - Se o texto contrariar algum entendimento consolidado do TCU/TCE sobre ETPs, aponte a divergência citando a fonte.
+        
+        Contexto (Leis e Manuais): {context}
+        PARECER SOBRE O ETP:
+        """
+
+    # Prompt para o TR (Art. 6)
+    else: # TR
+        prompt_template = """
+        Você é um Auditor Técnico.
+        Analise o Termo de Referência (TR).
+        
+        FOCO DA ANÁLISE: {question}
+        
+        DIRETRIZES:
+        - Valide a definição do objeto (Art. 6º, XXIII).
+        - Verifique se há restrição indevida (Ex: Marca, Sede, Vistoria).
+        - Use a jurisprudência fornecida para embasar se uma exigência é abusiva ou não.
+        
+        Contexto (Leis e Jurisprudência): {context}
+        PARECER SOBRE O TR:
+        """
+
     if "OPENAI_API_KEY" in st.secrets:
         api_key = st.secrets["OPENAI_API_KEY"]
     else:
@@ -90,92 +126,107 @@ def get_audit_chain():
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
     return load_qa_chain(model, chain_type="stuff", prompt=prompt)
 
-# --- LOGIN E CRÉDITOS ---
+# --- 3. LOGIN ---
 def check_login(key):
-    # Dicionário de Usuários
-    # Dica: Adicione seus amigos aqui com 3 créditos
     users = {
         "AMIGO_TESTE": 3,
-        "PREFEITURA_X": 3,
-        "GUSTAVO_ADMIN": 99  # Só esse usuário vê os logs
+        "PREFEITURA_X": 10,
+        "GUSTAVO_ADMIN": 99
     }
     return users.get(key, -1)
 
-# --- TELA PRINCIPAL ---
+# --- 4. FUNÇÃO QUE RODA A ANÁLISE ---
+def run_analysis(vectorstore, uploaded_file, doc_type, questions):
+    reader = PdfReader(uploaded_file)
+    doc_text = ""
+    for page in reader.pages:
+        doc_text += page.extract_text()
+    
+    chain = get_specialized_chain(doc_type)
+    
+    st.markdown(f"### 📋 Relatório de Auditoria: {doc_type}")
+    progress_bar = st.progress(0)
+    
+    for i, q in enumerate(questions):
+        docs = vectorstore.similarity_search(q)
+        # Limita o texto para não estourar a memória da IA (6000 chars)
+        resp = chain.run(input_documents=docs, question=f"Texto do Documento: {doc_text[:6000]}... TAREFA: {q}")
+        
+        with st.chat_message("assistant"):
+            st.markdown(f"**Ponto de Controle {i+1}:** {q}")
+            st.write(resp)
+        
+        progress_bar.progress((i + 1) / len(questions))
+    
+    st.success(f"✅ Análise do {doc_type} Finalizada!")
+
+# --- 5. TELA PRINCIPAL ---
 def main():
-    st.title("🏛️ AguiarGov - Auditor IA")
+    st.title("🏛️ AguiarGov - Auditor IA (Sistema Modular)")
     st.markdown("---")
     
     with st.sidebar:
-        st.header("🔐 Área Restrita")
-        key = st.text_input("Digite sua Senha de Acesso", type="password")
+        st.header("🔐 Acesso")
+        key = st.text_input("Senha", type="password")
         if key:
             credits = check_login(key)
             if credits > -1:
                 st.session_state['logged'] = True
-                st.session_state['user_key'] = key # Salva quem está logado
-                st.success(f"Bem-vindo! Créditos de Análise: {credits}")
+                st.session_state['user_key'] = key
+                st.success(f"Logado. Créditos: {credits}")
             else:
-                st.error("Senha não encontrada.")
+                st.error("Senha inválida.")
     
     if st.session_state.get('logged'):
-        with st.spinner("🤖 O Robô está estudando as leis... aguarde um momento."):
+        with st.spinner("Carregando Leis e Jurisprudência... (Isso pode demorar 1 min)"):
             vectorstore, qtd, logs = load_knowledge_base()
         
-        # --- SEGREDO: SÓ O ADMIN VÊ OS LOGS ---
-        # Se a chave for GUSTAVO_ADMIN, mostra a lista. Se for AMIGO_TESTE, esconde.
-        current_user = st.session_state.get('user_key')
+        # Logs Admin (Só Gustavo vê)
+        if st.session_state.get('user_key') == "GUSTAVO_ADMIN" and qtd > 0:
+             with st.expander("🕵️ Logs do Admin (Arquivos Lidos)"):
+                for log in logs: st.write(log)
         
-        if current_user == "GUSTAVO_ADMIN" and qtd > 0:
-            with st.expander(f"🕵️ Painel do Admin ({qtd} arquivos carregados)"):
-                for log in logs:
-                    st.write(log)
-        
-        # Se deu erro geral (0 arquivos), avisa todo mundo
-        elif qtd == 0:
-            st.error("⚠️ Erro no sistema: Base de dados vazia. Contate o suporte.")
-        
-        # --- ÁREA DO CLIENTE ---
         if vectorstore:
-            st.markdown("### 📂 Upload do Edital")
-            st.info("O sistema aceita arquivos PDF de até 200MB.")
+            # --- SISTEMA DE ABAS ---
+            tab1, tab2, tab3 = st.tabs(["📄 1. EDITAL", "📘 2. ETP", "📋 3. TR / P. BÁSICO"])
             
-            # Botão traduzido no Rótulo
-            uploaded_file = st.file_uploader("Clique abaixo para selecionar o arquivo PDF do seu computador", type="pdf")
-            
-            if uploaded_file:
-                st.success("Arquivo recebido! Clique no botão abaixo para iniciar.")
-                if st.button("🚀 AUDITAR AGORA (Gastar 1 Crédito)"):
-                    reader = PdfReader(uploaded_file)
-                    edital_text = ""
-                    for page in reader.pages:
-                        edital_text += page.extract_text()
-                    
-                    # As perguntas que o robô vai responder
+            # --- ABA 1: EDITAL ---
+            with tab1:
+                st.info("Auditoria Geral: Prazos, Modalidade, Habilitação e Contrato.")
+                file_edital = st.file_uploader("Suba o EDITAL", type="pdf", key="u1")
+                if file_edital and st.button("AUDITAR EDITAL (1 Crédito)", key="b1"):
                     questions = [
-                        "Há exigência de Capital Social acima de 10%?",
-                        "O critério de julgamento está correto para o objeto?",
-                        "Há exigência de garantia contratual abusiva?"
+                        "Verifique a MODALIDADE e o CRITÉRIO DE JULGAMENTO. Estão adequados ao objeto? (Art. 28 e 33)",
+                        "Analise os REQUISITOS DE HABILITAÇÃO (Jurídica, Fiscal, Técnica, Econômica). Há excessos ou restrições? (Art. 62 a 70)",
+                        "Verifique os PRAZOS DE PUBLICAÇÃO e de IMPUGNAÇÃO. Estão corretos? (Art. 55 e 164)"
                     ]
-                    
-                    chain = get_audit_chain()
-                    st.write("---")
-                    st.subheader("📋 Relatório da Auditoria")
-                    
-                    progress_bar = st.progress(0)
-                    
-                    for i, q in enumerate(questions):
-                        docs = vectorstore.similarity_search(q)
-                        resp = chain.run(input_documents=docs, question=f"Edital: {edital_text[:3000]}... Pergunta: {q}")
-                        
-                        with st.chat_message("assistant"):
-                            st.markdown(f"**Pergunta {i+1}:** {q}")
-                            st.write(resp)
-                        
-                        # Atualiza a barra de progresso
-                        progress_bar.progress((i + 1) / len(questions))
-                        
-                    st.success("✅ Auditoria Finalizada!")
+                    run_analysis(vectorstore, file_edital, "EDITAL", questions)
+
+            # --- ABA 2: ETP ---
+            with tab2:
+                st.info("Auditoria Específica: Art. 18, §1º da Lei 14.133/21.")
+                file_etp = st.file_uploader("Suba o ETP", type="pdf", key="u2")
+                if file_etp and st.button("AUDITAR ETP (1 Crédito)", key="b2"):
+                    questions = [
+                        "O ETP descreve a NECESSIDADE da contratação de forma clara? (Inciso I)",
+                        "Houve LEVANTAMENTO DE MERCADO e análise de alternativas? (Inciso III)",
+                        "Há ESTIMATIVA DO VALOR e adequação orçamentária? (Inciso VI e VII)",
+                        "A ESCOLHA DA SOLUÇÃO foi justificada técnica e economicamente? (Inciso VIII)"
+                    ]
+                    run_analysis(vectorstore, file_etp, "ETP", questions)
+
+            # --- ABA 3: TR ---
+            with tab3:
+                st.info("Auditoria Específica: Art. 6º, XXIII (Objeto, Execução, Pagamento).")
+                file_tr = st.file_uploader("Suba o TR / Projeto Básico", type="pdf", key="u3")
+                if file_tr and st.button("AUDITAR TR (1 Crédito)", key="b3"):
+                    questions = [
+                        "A definição do OBJETO é precisa, suficiente e clara? Há vedação de marca? (Inciso XXIII, 'a')",
+                        "O MODELO DE EXECUÇÃO do objeto está claro? (Inciso XXIII, 'e')",
+                        "Os CRITÉRIOS DE MEDIÇÃO E PAGAMENTO estão definidos objetivamente? (Inciso XXIII, 'h')",
+                        "Há previsão de FISCALIZAÇÃO e critérios de recebimento? (Inciso XXIII, 'g')"
+                    ]
+                    run_analysis(vectorstore, file_tr, "TR", questions)
 
 if __name__ == "__main__":
     main()
