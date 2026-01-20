@@ -11,6 +11,15 @@ from langchain.prompts import PromptTemplate
 # Configuração da Página
 st.set_page_config(page_title="LicitaGov - Auditor IA", page_icon="⚖️", layout="wide")
 
+# --- INICIALIZAR MEMÓRIA (SESSION STATE) ---
+# É aqui que garantimos que o resultado não suma quando troca de aba
+if 'result_edital' not in st.session_state:
+    st.session_state['result_edital'] = None
+if 'result_etp' not in st.session_state:
+    st.session_state['result_etp'] = None
+if 'result_tr' not in st.session_state:
+    st.session_state['result_tr'] = None
+
 # --- 1. CARREGAMENTO DA BASE JURÍDICA ---
 @st.cache_resource(show_spinner=False)
 def load_knowledge_base():
@@ -63,8 +72,6 @@ def load_knowledge_base():
 # --- 2. CÉREBRO ESPECIALISTA ---
 def get_specialized_chain(doc_type):
     
-    # Adicionei a instrução: "NÃO COLOQUE ASSINATURA" em todos os prompts
-    
     if doc_type == "EDITAL":
         prompt_template = """
         Você é um Auditor Especialista em Licitações e Jurisprudência (TCU/TCE).
@@ -77,7 +84,7 @@ def get_specialized_chain(doc_type):
         1. Se encontrar irregularidade, cite o Artigo da Lei.
         2. CITE A FONTE JURISPRUDENCIAL se houver no contexto.
         3. Seja técnico e direto.
-        4. NÃO COLOQUE ASSINATURA, NOME OU ESPAÇO PARA ASSINAR NO FINAL. TERMINE COM O PARECER.
+        4. NÃO COLOQUE ASSINATURA.
         
         Contexto: {context}
         PARECER TÉCNICO:
@@ -92,8 +99,8 @@ def get_specialized_chain(doc_type):
         
         DIRETRIZES:
         - Verifique os incisos do Art. 18.
-        - Se o texto contrariar algum entendimento consolidado, aponte a divergência.
-        - NÃO COLOQUE ASSINATURA NO FINAL.
+        - Se o texto contrariar entendimento consolidado, aponte.
+        - NÃO COLOQUE ASSINATURA.
         
         Contexto: {context}
         PARECER SOBRE O ETP:
@@ -109,7 +116,7 @@ def get_specialized_chain(doc_type):
         DIRETRIZES:
         - Valide a definição do objeto (Art. 6º, XXIII).
         - Verifique se há restrição indevida.
-        - NÃO COLOQUE ASSINATURA NO FINAL.
+        - NÃO COLOQUE ASSINATURA.
         
         Contexto: {context}
         PARECER SOBRE O TR:
@@ -133,10 +140,8 @@ def check_login(key):
     }
     return users.get(key, -1)
 
-# --- 4. FUNÇÃO QUE RODA A ANÁLISE (MODIFICADA PARA TÍTULOS) ---
-def run_analysis(vectorstore, uploaded_file, doc_type, questions_list):
-    # questions_list agora recebe tuplas: ("Título Bonito", "Prompt Técnico")
-    
+# --- 4. FUNÇÃO QUE GERA A ANÁLISE (E RETORNA OS DADOS) ---
+def process_audit(vectorstore, uploaded_file, doc_type, questions_list):
     reader = PdfReader(uploaded_file)
     doc_text = ""
     for page in reader.pages:
@@ -144,23 +149,37 @@ def run_analysis(vectorstore, uploaded_file, doc_type, questions_list):
     
     chain = get_specialized_chain(doc_type)
     
-    st.markdown(f"### 📋 Resultado da Análise ({doc_type})")
+    # Lista para guardar os resultados
+    results = []
+    
+    # Barra de progresso visual
     progress_bar = st.progress(0)
+    status_text = st.empty()
     
     for i, (titulo_bonito, prompt_tecnico) in enumerate(questions_list):
+        status_text.text(f"Analisando: {titulo_bonito}...")
         docs = vectorstore.similarity_search(prompt_tecnico)
         resp = chain.run(input_documents=docs, question=f"Texto do Documento: {doc_text[:6000]}... TAREFA: {prompt_tecnico}")
         
-        with st.chat_message("assistant"):
-            # Agora mostra o Título Bonito e não a pergunta inteira
-            st.markdown(f"**{titulo_bonito}**")
-            st.write(resp)
+        # Guarda o resultado na lista
+        results.append((titulo_bonito, resp))
         
         progress_bar.progress((i + 1) / len(questions_list))
     
-    st.success(f"✅ Análise Finalizada.")
+    status_text.text("Concluído!")
+    return results
 
-# --- 5. TELA PRINCIPAL ---
+# --- 5. FUNÇÃO PARA MOSTRAR O RESULTADO (VISUAL) ---
+def display_results(results_list, doc_type):
+    if results_list:
+        st.markdown(f"### 📋 Resultado da Análise ({doc_type})")
+        for titulo, resposta in results_list:
+            with st.chat_message("assistant"):
+                st.markdown(f"**{titulo}**")
+                st.write(resposta)
+        st.success("Análise salva na memória.")
+
+# --- 6. TELA PRINCIPAL ---
 def main():
     st.title("🏛️ AguiarGov - Auditor IA")
     st.markdown("---")
@@ -191,18 +210,25 @@ def main():
             # --- ABA 1: EDITAL ---
             with tab1:
                 file_edital = st.file_uploader("Selecione o arquivo PDF do Edital", type="pdf", key="u1")
+                
+                # Botão de Ação
                 if file_edital and st.button("AUDITAR ARQUIVO (1 Crédito)", key="b1"):
-                    # Lista de Tuplas: (Título que aparece na tela, Pergunta pro Robô)
                     questions = [
                         ("1. Análise de Modalidade e Critério", "Verifique a MODALIDADE e o CRITÉRIO DE JULGAMENTO. Estão adequados ao objeto? (Art. 28 e 33)"),
                         ("2. Análise de Habilitação", "Analise os REQUISITOS DE HABILITAÇÃO (Jurídica, Fiscal, Técnica, Econômica). Há excessos ou restrições? (Art. 62 a 70)"),
                         ("3. Prazos e Publicidade", "Verifique os PRAZOS DE PUBLICAÇÃO e de IMPUGNAÇÃO. Estão corretos? (Art. 55 e 164)")
                     ]
-                    run_analysis(vectorstore, file_edital, "EDITAL", questions)
+                    # Salva no Session State
+                    st.session_state['result_edital'] = process_audit(vectorstore, file_edital, "EDITAL", questions)
+                
+                # Mostra o resultado SE ele existir na memória
+                if st.session_state['result_edital']:
+                    display_results(st.session_state['result_edital'], "EDITAL")
 
             # --- ABA 2: ETP ---
             with tab2:
                 file_etp = st.file_uploader("Selecione o arquivo PDF do ETP", type="pdf", key="u2")
+                
                 if file_etp and st.button("AUDITAR ARQUIVO (1 Crédito)", key="b2"):
                     questions = [
                         ("1. Análise da Necessidade", "O ETP descreve a NECESSIDADE da contratação de forma clara? (Inciso I)"),
@@ -210,11 +236,15 @@ def main():
                         ("3. Estimativa e Orçamento", "Há ESTIMATIVA DO VALOR e adequação orçamentária? (Inciso VI e VII)"),
                         ("4. Justificativa da Solução", "A ESCOLHA DA SOLUÇÃO foi justificada técnica e economicamente? (Inciso VIII)")
                     ]
-                    run_analysis(vectorstore, file_etp, "ETP", questions)
+                    st.session_state['result_etp'] = process_audit(vectorstore, file_etp, "ETP", questions)
+                
+                if st.session_state['result_etp']:
+                    display_results(st.session_state['result_etp'], "ETP")
 
             # --- ABA 3: TR ---
             with tab3:
                 file_tr = st.file_uploader("Selecione o arquivo PDF do TR", type="pdf", key="u3")
+                
                 if file_tr and st.button("AUDITAR ARQUIVO (1 Crédito)", key="b3"):
                     questions = [
                         ("1. Definição do Objeto", "A definição do OBJETO é precisa, suficiente e clara? Há vedação de marca? (Inciso XXIII, 'a')"),
@@ -222,7 +252,10 @@ def main():
                         ("3. Medição e Pagamento", "Os CRITÉRIOS DE MEDIÇÃO E PAGAMENTO estão definidos objetivamente? (Inciso XXIII, 'h')"),
                         ("4. Fiscalização", "Há previsão de FISCALIZAÇÃO e critérios de recebimento? (Inciso XXIII, 'g')")
                     ]
-                    run_analysis(vectorstore, file_tr, "TR", questions)
+                    st.session_state['result_tr'] = process_audit(vectorstore, file_tr, "TR", questions)
+                
+                if st.session_state['result_tr']:
+                    display_results(st.session_state['result_tr'], "TR")
 
 if __name__ == "__main__":
     main()
