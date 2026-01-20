@@ -1,8 +1,8 @@
 import streamlit as st
 import os
 from PyPDF2 import PdfReader
-# CORREÇÃO AQUI: Importando da nova biblioteca específica
-from langchain_text_splitters import CharacterTextSplitter
+# VOLTAMOS PARA O IMPORT CLÁSSICO (Funciona na v0.1.20)
+from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.chains.question_answering import load_qa_chain
@@ -47,7 +47,7 @@ def load_knowledge_base():
     text_splitter = CharacterTextSplitter(separator="\n", chunk_size=1000, chunk_overlap=200, length_function=len)
     chunks = text_splitter.split_text(text)
     
-    # Gestão de Senha (Segura)
+    # Gestão de Senha
     if "OPENAI_API_KEY" in st.secrets:
         api_key = st.secrets["OPENAI_API_KEY"]
     else:
@@ -114,9 +114,8 @@ def main():
                 st.error("Senha Errada")
     
     if st.session_state.get('logged'):
-        # Verifica se o arquivo existe na pasta data (apenas visual)
         if not os.path.exists("data"):
-            st.warning("⚠️ Pasta 'data' não encontrada no GitHub. O sistema vai rodar vazio.")
+            st.warning("⚠️ Pasta 'data' não encontrada. O sistema vai rodar vazio.")
         
         with st.spinner("Lendo PDFs e criando inteligência... (Isso pode demorar 1 min)"):
             vectorstore, qtd = load_knowledge_base()
