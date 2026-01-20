@@ -1,11 +1,8 @@
-requirements.txt
 streamlit
 openai
 langchain
 langchain-community
 langchain-openai
 faiss-cpu
-pypdf
-python-dotenv
+PyPDF2
 tiktoken
-watchdog
