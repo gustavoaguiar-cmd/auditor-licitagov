@@ -1,4 +1,3 @@
-app.py
 import streamlit as st
 import os
 from PyPDF2 import PdfReader
@@ -7,13 +6,9 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
-from dotenv import load_dotenv
 
 # Configuração da Página
 st.set_page_config(page_title="LicitaGov - Auditor IA", page_icon="⚖️", layout="wide")
-
-# Carrega variáveis locais (para quando você testar no PC, se quiser)
-load_dotenv()
 
 # --- FUNÇÃO QUE LÊ OS PDFS AUTOMATICAMENTE ---
 @st.cache_resource(show_spinner=False)
@@ -53,7 +48,16 @@ def load_knowledge_base():
     chunks = text_splitter.split_text(text)
     
     # Pega a senha (do Site ou do Arquivo Local)
-    api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    # Tenta pegar dos segredos do Streamlit
+    if "OPENAI_API_KEY" in st.secrets:
+        api_key = st.secrets["OPENAI_API_KEY"]
+    else:
+        # Se não achar, tenta variável de ambiente (para teste local)
+        api_key = os.getenv("OPENAI_API_KEY")
+
+    if not api_key:
+        st.error("Chave da API não encontrada! Configure nos Secrets do Streamlit.")
+        return None, 0
     
     embeddings = OpenAIEmbeddings(openai_api_key=api_key)
     vectorstore = FAISS.from_texts(texts=chunks, embedding=embeddings)
@@ -78,7 +82,11 @@ def get_audit_chain():
     
     Parecer:
     """
-    api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if "OPENAI_API_KEY" in st.secrets:
+        api_key = st.secrets["OPENAI_API_KEY"]
+    else:
+        api_key = os.getenv("OPENAI_API_KEY")
+
     model = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=api_key)
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
     return load_qa_chain(model, chain_type="stuff", prompt=prompt)
@@ -109,7 +117,7 @@ def main():
                 st.error("Senha Errada")
     
     if st.session_state.get('logged'):
-        with st.spinner("Lendo PDFs e criando inteligência..."):
+        with st.spinner("Lendo PDFs e criando inteligência... (Isso pode demorar 1 min)"):
             vectorstore, qtd = load_knowledge_base()
         
         if vectorstore:
@@ -133,12 +141,13 @@ def main():
                 st.write("---")
                 for q in questions:
                     docs = vectorstore.similarity_search(q)
+                    # Limitamos o texto do edital para não estourar o limite da IA
                     resp = chain.run(input_documents=docs, question=f"Edital: {edital_text[:3000]}... Pergunta: {q}")
                     st.markdown(f"#### 🧐 {q}")
                     st.write(resp)
                     st.write("---")
         else:
-            st.warning("Nenhum PDF encontrado na pasta data.")
+            st.warning("Nenhum PDF encontrado na pasta data ou erro na leitura.")
 
 if __name__ == "__main__":
     main()
