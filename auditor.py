@@ -11,7 +11,7 @@ from langchain.prompts import PromptTemplate
 # Configuração da Página
 st.set_page_config(page_title="LicitaGov - Auditor IA", page_icon="⚖️", layout="wide")
 
-# --- 1. CARREGAMENTO DA BASE JURÍDICA (LEIS/JURISPRUDÊNCIA) ---
+# --- 1. CARREGAMENTO DA BASE JURÍDICA ---
 @st.cache_resource(show_spinner=False)
 def load_knowledge_base():
     text = ""
@@ -22,7 +22,6 @@ def load_knowledge_base():
     if not os.path.exists(data_folder):
         return None, 0, ["ERRO: Pasta 'data' não encontrada."]
 
-    # MODO FAREJADOR: Entra em todas as subpastas (Legislacao, TCU, Sumulas, etc)
     for root, dirs, files in os.walk(data_folder):
         for filename in files:
             if filename.lower().endswith('.pdf'):
@@ -49,7 +48,6 @@ def load_knowledge_base():
     text_splitter = CharacterTextSplitter(separator="\n", chunk_size=1000, chunk_overlap=200, length_function=len)
     chunks = text_splitter.split_text(text)
     
-    # Gestão de Senha Segura
     if "OPENAI_API_KEY" in st.secrets:
         api_key = st.secrets["OPENAI_API_KEY"]
     else:
@@ -62,29 +60,26 @@ def load_knowledge_base():
     vectorstore = FAISS.from_texts(texts=chunks, embedding=embeddings)
     return vectorstore, files_processed, debug_log
 
-# --- 2. CÉREBRO ESPECIALISTA (ATUALIZADO PARA CITAR FONTES) ---
+# --- 2. CÉREBRO ESPECIALISTA ---
 def get_specialized_chain(doc_type):
     
-    # Prompt para o EDITAL (Geral)
     if doc_type == "EDITAL":
         prompt_template = """
         Você é um Auditor Especialista em Licitações e Jurisprudência (TCU/TCE).
         Analise o texto do EDITAL fornecido.
-        
-        Sua missão é cruzar as exigências do edital com a LEI 14.133/21 e a JURISPRUDÊNCIA fornecida (Acórdãos, Súmulas, Manuais).
+        Sua missão é cruzar as exigências do edital com a LEI 14.133/21 e a JURISPRUDÊNCIA fornecida.
         
         FOCO DA ANÁLISE: {question}
         
         DIRETRIZES OBRIGATÓRIAS:
         1. Se encontrar irregularidade, cite o Artigo da Lei.
-        2. CITE A FONTE JURISPRUDENCIAL se houver no contexto (Ex: "Conforme Acórdão TCU nº X", "Segundo Súmula Y", "Conforme Prejulgado TCE/ES Z").
+        2. CITE A FONTE JURISPRUDENCIAL se houver no contexto (Ex: "Conforme Acórdão TCU nº X", "Segundo Súmula Y").
         3. Seja técnico e direto.
         
-        Contexto (Leis e Jurisprudência encontradas): {context}
+        Contexto: {context}
         PARECER TÉCNICO:
         """
 
-    # Prompt para o ETP (Art. 18)
     elif doc_type == "ETP":
         prompt_template = """
         Você é um Auditor Focado em Planejamento.
@@ -93,14 +88,13 @@ def get_specialized_chain(doc_type):
         FOCO DA ANÁLISE: {question}
         
         DIRETRIZES:
-        - Verifique os incisos do Art. 18 (Necessidade, Alternativas, Estimativa).
-        - Se o texto contrariar algum entendimento consolidado do TCU/TCE sobre ETPs, aponte a divergência citando a fonte.
+        - Verifique os incisos do Art. 18.
+        - Se o texto contrariar algum entendimento consolidado, aponte a divergência.
         
-        Contexto (Leis e Manuais): {context}
+        Contexto: {context}
         PARECER SOBRE O ETP:
         """
 
-    # Prompt para o TR (Art. 6)
     else: # TR
         prompt_template = """
         Você é um Auditor Técnico.
@@ -110,10 +104,10 @@ def get_specialized_chain(doc_type):
         
         DIRETRIZES:
         - Valide a definição do objeto (Art. 6º, XXIII).
-        - Verifique se há restrição indevida (Ex: Marca, Sede, Vistoria).
-        - Use a jurisprudência fornecida para embasar se uma exigência é abusiva ou não.
+        - Verifique se há restrição indevida.
+        - Use a jurisprudência fornecida para embasar.
         
-        Contexto (Leis e Jurisprudência): {context}
+        Contexto: {context}
         PARECER SOBRE O TR:
         """
 
@@ -144,25 +138,26 @@ def run_analysis(vectorstore, uploaded_file, doc_type, questions):
     
     chain = get_specialized_chain(doc_type)
     
-    st.markdown(f"### 📋 Relatório de Auditoria: {doc_type}")
+    # Título discreto no relatório
+    st.markdown(f"### 📋 Resultado da Análise ({doc_type})")
     progress_bar = st.progress(0)
     
     for i, q in enumerate(questions):
         docs = vectorstore.similarity_search(q)
-        # Limita o texto para não estourar a memória da IA (6000 chars)
         resp = chain.run(input_documents=docs, question=f"Texto do Documento: {doc_text[:6000]}... TAREFA: {q}")
         
         with st.chat_message("assistant"):
-            st.markdown(f"**Ponto de Controle {i+1}:** {q}")
+            # Aqui mantemos a pergunta visível APENAS no relatório final
+            st.markdown(f"**Item Analisado:** {q}")
             st.write(resp)
         
         progress_bar.progress((i + 1) / len(questions))
     
-    st.success(f"✅ Análise do {doc_type} Finalizada!")
+    st.success(f"✅ Análise Finalizada.")
 
-# --- 5. TELA PRINCIPAL ---
+# --- 5. TELA PRINCIPAL (LIMPA/BLACK BOX) ---
 def main():
-    st.title("🏛️ AguiarGov - Auditor IA (Sistema Modular)")
+    st.title("🏛️ AguiarGov - Auditor IA")
     st.markdown("---")
     
     with st.sidebar:
@@ -178,23 +173,22 @@ def main():
                 st.error("Senha inválida.")
     
     if st.session_state.get('logged'):
-        with st.spinner("Carregando Leis e Jurisprudência... (Isso pode demorar 1 min)"):
+        with st.spinner("Inicializando o sistema..."):
             vectorstore, qtd, logs = load_knowledge_base()
         
-        # Logs Admin (Só Gustavo vê)
         if st.session_state.get('user_key') == "GUSTAVO_ADMIN" and qtd > 0:
-             with st.expander("🕵️ Logs do Admin (Arquivos Lidos)"):
+             with st.expander("🕵️ Logs do Admin"):
                 for log in logs: st.write(log)
         
         if vectorstore:
-            # --- SISTEMA DE ABAS ---
-            tab1, tab2, tab3 = st.tabs(["📄 1. EDITAL", "📘 2. ETP", "📋 3. TR / P. BÁSICO"])
+            # --- ABAS LIMPAS (SEM EXPLICAÇÃO TÉCNICA) ---
+            tab1, tab2, tab3 = st.tabs(["📄 EDITAL", "📘 ETP", "📋 TR / P. BÁSICO"])
             
             # --- ABA 1: EDITAL ---
             with tab1:
-                st.info("Auditoria Geral: Prazos, Modalidade, Habilitação e Contrato.")
-                file_edital = st.file_uploader("Suba o EDITAL", type="pdf", key="u1")
-                if file_edital and st.button("AUDITAR EDITAL (1 Crédito)", key="b1"):
+                # Sem st.info explicando o que faz
+                file_edital = st.file_uploader("Selecione o arquivo PDF do Edital", type="pdf", key="u1")
+                if file_edital and st.button("AUDITAR ARQUIVO (1 Crédito)", key="b1"):
                     questions = [
                         "Verifique a MODALIDADE e o CRITÉRIO DE JULGAMENTO. Estão adequados ao objeto? (Art. 28 e 33)",
                         "Analise os REQUISITOS DE HABILITAÇÃO (Jurídica, Fiscal, Técnica, Econômica). Há excessos ou restrições? (Art. 62 a 70)",
@@ -204,9 +198,8 @@ def main():
 
             # --- ABA 2: ETP ---
             with tab2:
-                st.info("Auditoria Específica: Art. 18, §1º da Lei 14.133/21.")
-                file_etp = st.file_uploader("Suba o ETP", type="pdf", key="u2")
-                if file_etp and st.button("AUDITAR ETP (1 Crédito)", key="b2"):
+                file_etp = st.file_uploader("Selecione o arquivo PDF do ETP", type="pdf", key="u2")
+                if file_etp and st.button("AUDITAR ARQUIVO (1 Crédito)", key="b2"):
                     questions = [
                         "O ETP descreve a NECESSIDADE da contratação de forma clara? (Inciso I)",
                         "Houve LEVANTAMENTO DE MERCADO e análise de alternativas? (Inciso III)",
@@ -217,9 +210,8 @@ def main():
 
             # --- ABA 3: TR ---
             with tab3:
-                st.info("Auditoria Específica: Art. 6º, XXIII (Objeto, Execução, Pagamento).")
-                file_tr = st.file_uploader("Suba o TR / Projeto Básico", type="pdf", key="u3")
-                if file_tr and st.button("AUDITAR TR (1 Crédito)", key="b3"):
+                file_tr = st.file_uploader("Selecione o arquivo PDF do TR", type="pdf", key="u3")
+                if file_tr and st.button("AUDITAR ARQUIVO (1 Crédito)", key="b3"):
                     questions = [
                         "A definição do OBJETO é precisa, suficiente e clara? Há vedação de marca? (Inciso XXIII, 'a')",
                         "O MODELO DE EXECUÇÃO do objeto está claro? (Inciso XXIII, 'e')",
