@@ -1,7 +1,8 @@
 import streamlit as st
 import os
 from PyPDF2 import PdfReader
-from langchain.text_splitter import CharacterTextSplitter
+# CORREÇÃO AQUI: Importando da nova biblioteca específica
+from langchain_text_splitters import CharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.chains.question_answering import load_qa_chain
@@ -14,7 +15,6 @@ st.set_page_config(page_title="LicitaGov - Auditor IA", page_icon="⚖️", layo
 @st.cache_resource(show_spinner=False)
 def load_knowledge_base():
     text = ""
-    # O Streamlit vai procurar a pasta 'data' junto com o código
     data_folder = "data"
     
     subfolders = ["legislacao", "tcu_informativos", "tce_es_informativos", "doutrina_manuais"]
@@ -47,12 +47,10 @@ def load_knowledge_base():
     text_splitter = CharacterTextSplitter(separator="\n", chunk_size=1000, chunk_overlap=200, length_function=len)
     chunks = text_splitter.split_text(text)
     
-    # Pega a senha (do Site ou do Arquivo Local)
-    # Tenta pegar dos segredos do Streamlit
+    # Gestão de Senha (Segura)
     if "OPENAI_API_KEY" in st.secrets:
         api_key = st.secrets["OPENAI_API_KEY"]
     else:
-        # Se não achar, tenta variável de ambiente (para teste local)
         api_key = os.getenv("OPENAI_API_KEY")
 
     if not api_key:
@@ -93,7 +91,6 @@ def get_audit_chain():
 
 # --- SENHAS DE ACESSO (Login) ---
 def check_login(key):
-    # Aqui você define as senhas dos seus amigos
     users = {
         "AMIGO_TESTE": 3,
         "PREFEITO_01": 3,
@@ -117,6 +114,10 @@ def main():
                 st.error("Senha Errada")
     
     if st.session_state.get('logged'):
+        # Verifica se o arquivo existe na pasta data (apenas visual)
+        if not os.path.exists("data"):
+            st.warning("⚠️ Pasta 'data' não encontrada no GitHub. O sistema vai rodar vazio.")
+        
         with st.spinner("Lendo PDFs e criando inteligência... (Isso pode demorar 1 min)"):
             vectorstore, qtd = load_knowledge_base()
         
@@ -130,7 +131,6 @@ def main():
                 for page in reader.pages:
                     edital_text += page.extract_text()
                 
-                # Perguntas Automáticas
                 questions = [
                     "Há exigência de Capital Social acima de 10%?",
                     "O critério de julgamento está correto para o objeto?",
@@ -141,13 +141,12 @@ def main():
                 st.write("---")
                 for q in questions:
                     docs = vectorstore.similarity_search(q)
-                    # Limitamos o texto do edital para não estourar o limite da IA
                     resp = chain.run(input_documents=docs, question=f"Edital: {edital_text[:3000]}... Pergunta: {q}")
                     st.markdown(f"#### 🧐 {q}")
                     st.write(resp)
                     st.write("---")
         else:
-            st.warning("Nenhum PDF encontrado na pasta data ou erro na leitura.")
+            st.warning("Nenhum PDF processado. Verifique se subiu os arquivos na pasta data.")
 
 if __name__ == "__main__":
     main()
