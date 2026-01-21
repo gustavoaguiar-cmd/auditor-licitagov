@@ -12,7 +12,6 @@ from langchain.prompts import PromptTemplate
 st.set_page_config(page_title="LicitaGov - Auditor IA", page_icon="⚖️", layout="wide")
 
 # --- INICIALIZAR MEMÓRIA (SESSION STATE) ---
-# É aqui que garantimos que o resultado não suma quando troca de aba
 if 'result_edital' not in st.session_state:
     st.session_state['result_edital'] = None
 if 'result_etp' not in st.session_state:
@@ -69,56 +68,64 @@ def load_knowledge_base():
     vectorstore = FAISS.from_texts(texts=chunks, embedding=embeddings)
     return vectorstore, files_processed, debug_log
 
-# --- 2. CÉREBRO ESPECIALISTA ---
+# --- 2. CÉREBRO ESPECIALISTA (MODO CÉTICO/ANTI-ALUCINAÇÃO) ---
 def get_specialized_chain(doc_type):
+    
+    # REGRAS DE OURO ADICIONADAS NOS PROMPTS:
+    # "BASEIE-SE APENAS NO TEXTO DO DOCUMENTO."
+    # "Se a informação não estiver explicita, diga: NÃO CONSTA NO DOCUMENTO."
     
     if doc_type == "EDITAL":
         prompt_template = """
-        Você é um Auditor Especialista em Licitações e Jurisprudência (TCU/TCE).
-        Analise o texto do EDITAL fornecido.
-        Sua missão é cruzar as exigências do edital com a LEI 14.133/21 e a JURISPRUDÊNCIA fornecida.
+        Você é um Auditor Rigoroso de Licitações.
+        Analise o texto do DOCUMENTO UPLOADED (Edital) fornecido abaixo.
         
-        FOCO DA ANÁLISE: {question}
+        Sua missão é verificar se o texto do documento contém as exigências da LEI 14.133/21.
         
-        DIRETRIZES OBRIGATÓRIAS:
-        1. Se encontrar irregularidade, cite o Artigo da Lei.
-        2. CITE A FONTE JURISPRUDENCIAL se houver no contexto.
-        3. Seja técnico e direto.
-        4. NÃO COLOQUE ASSINATURA.
+        PERGUNTA DA AUDITORIA: {question}
         
-        Contexto: {context}
+        REGRAS CRÍTICAS DE RESPOSTA (Anti-Alucinação):
+        1. Responda APENAS com base no que está escrito no "Texto do Documento".
+        2. Se o documento for um Boleto, Receita, ou texto desconexo, diga: "ERRO: O documento analisado não parece ser um Edital válido."
+        3. Se a informação da pergunta NÃO estiver escrita no documento, diga: "IRREGULARIDADE/OMISSÃO: Este item não foi localizado no texto do edital." (NÃO assuma que existe só porque está na lei).
+        4. Se encontrar, cite o trecho e compare com a Lei/Jurisprudência.
+        5. NÃO COLOQUE ASSINATURA.
+        
+        Contexto Legal (Use apenas para comparar, não para inventar fatos): {context}
         PARECER TÉCNICO:
         """
 
     elif doc_type == "ETP":
         prompt_template = """
-        Você é um Auditor Focado em Planejamento.
-        Analise o ETP à luz do Art. 18 da Lei 14.133/21 e das orientações dos Manuais de Planejamento (TCU/TCE).
+        Você é um Auditor de Planejamento.
+        Analise o texto do DOCUMENTO UPLOADED (ETP).
         
-        FOCO DA ANÁLISE: {question}
+        PERGUNTA DA AUDITORIA: {question}
         
-        DIRETRIZES:
-        - Verifique os incisos do Art. 18.
-        - Se o texto contrariar entendimento consolidado, aponte.
-        - NÃO COLOQUE ASSINATURA.
+        REGRAS CRÍTICAS:
+        1. BASEIE-SE ESTRITAMENTE NO TEXTO DO DOCUMENTO.
+        2. Se o item (ex: Estimativa de Valor) não estiver escrito explicitamente no documento, diga: "OMISSÃO: O documento não apresenta este tópico obrigatório."
+        3. Se o documento for inválido (boleto, imagem), avise o usuário.
+        4. NÃO COLOQUE ASSINATURA.
         
-        Contexto: {context}
+        Contexto Legal: {context}
         PARECER SOBRE O ETP:
         """
 
     else: # TR
         prompt_template = """
         Você é um Auditor Técnico.
-        Analise o Termo de Referência (TR).
+        Analise o texto do DOCUMENTO UPLOADED (TR/Projeto Básico).
         
-        FOCO DA ANÁLISE: {question}
+        PERGUNTA DA AUDITORIA: {question}
         
-        DIRETRIZES:
-        - Valide a definição do objeto (Art. 6º, XXIII).
-        - Verifique se há restrição indevida.
-        - NÃO COLOQUE ASSINATURA.
+        REGRAS CRÍTICAS:
+        1. Busque a evidência APENAS no texto do documento fornecido.
+        2. Se não encontrar a definição do objeto ou fiscalização, diga: "OMISSÃO: Tópico não localizado no texto."
+        3. Não invente informações que não estão no PDF.
+        4. NÃO COLOQUE ASSINATURA.
         
-        Contexto: {context}
+        Contexto Legal: {context}
         PARECER SOBRE O TR:
         """
 
@@ -140,36 +147,37 @@ def check_login(key):
     }
     return users.get(key, -1)
 
-# --- 4. FUNÇÃO QUE GERA A ANÁLISE (E RETORNA OS DADOS) ---
+# --- 4. PROCESSAMENTO ---
 def process_audit(vectorstore, uploaded_file, doc_type, questions_list):
     reader = PdfReader(uploaded_file)
     doc_text = ""
     for page in reader.pages:
         doc_text += page.extract_text()
     
+    # Validação Mínima de Texto
+    if len(doc_text) < 50:
+        return [("Erro de Leitura", "O arquivo PDF parece ser uma imagem ou está vazio/protegido. Não foi possível ler o texto.")]
+
     chain = get_specialized_chain(doc_type)
-    
-    # Lista para guardar os resultados
     results = []
     
-    # Barra de progresso visual
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     for i, (titulo_bonito, prompt_tecnico) in enumerate(questions_list):
         status_text.text(f"Analisando: {titulo_bonito}...")
         docs = vectorstore.similarity_search(prompt_tecnico)
-        resp = chain.run(input_documents=docs, question=f"Texto do Documento: {doc_text[:6000]}... TAREFA: {prompt_tecnico}")
         
-        # Guarda o resultado na lista
+        # AQUI O SEGREDINHO: Reforçamos no input que o Texto do Documento é a Verdade
+        resp = chain.run(input_documents=docs, question=f"Texto do Documento (FONTE DA VERDADE): {doc_text[:6000]}... PERGUNTA DE AUDITORIA: {prompt_tecnico}")
+        
         results.append((titulo_bonito, resp))
-        
         progress_bar.progress((i + 1) / len(questions_list))
     
     status_text.text("Concluído!")
     return results
 
-# --- 5. FUNÇÃO PARA MOSTRAR O RESULTADO (VISUAL) ---
+# --- 5. EXIBIÇÃO ---
 def display_results(results_list, doc_type):
     if results_list:
         st.markdown(f"### 📋 Resultado da Análise ({doc_type})")
@@ -177,7 +185,6 @@ def display_results(results_list, doc_type):
             with st.chat_message("assistant"):
                 st.markdown(f"**{titulo}**")
                 st.write(resposta)
-        st.success("Análise salva na memória.")
 
 # --- 6. TELA PRINCIPAL ---
 def main():
@@ -210,31 +217,26 @@ def main():
             # --- ABA 1: EDITAL ---
             with tab1:
                 file_edital = st.file_uploader("Selecione o arquivo PDF do Edital", type="pdf", key="u1")
-                
-                # Botão de Ação
                 if file_edital and st.button("AUDITAR ARQUIVO (1 Crédito)", key="b1"):
                     questions = [
-                        ("1. Análise de Modalidade e Critério", "Verifique a MODALIDADE e o CRITÉRIO DE JULGAMENTO. Estão adequados ao objeto? (Art. 28 e 33)"),
-                        ("2. Análise de Habilitação", "Analise os REQUISITOS DE HABILITAÇÃO (Jurídica, Fiscal, Técnica, Econômica). Há excessos ou restrições? (Art. 62 a 70)"),
-                        ("3. Prazos e Publicidade", "Verifique os PRAZOS DE PUBLICAÇÃO e de IMPUGNAÇÃO. Estão corretos? (Art. 55 e 164)")
+                        ("1. Análise de Modalidade e Critério", "Verifique a MODALIDADE e o CRITÉRIO DE JULGAMENTO no texto. Estão adequados ao objeto? (Art. 28 e 33)"),
+                        ("2. Análise de Habilitação", "Analise os REQUISITOS DE HABILITAÇÃO (Jurídica, Fiscal, Técnica, Econômica) descritos no texto. Há excessos ou restrições?"),
+                        ("3. Prazos e Publicidade", "Busque no texto os PRAZOS DE PUBLICAÇÃO e de IMPUGNAÇÃO. Eles respeitam os dias úteis exigidos pela Lei 14.133?")
                     ]
-                    # Salva no Session State
                     st.session_state['result_edital'] = process_audit(vectorstore, file_edital, "EDITAL", questions)
                 
-                # Mostra o resultado SE ele existir na memória
                 if st.session_state['result_edital']:
                     display_results(st.session_state['result_edital'], "EDITAL")
 
             # --- ABA 2: ETP ---
             with tab2:
                 file_etp = st.file_uploader("Selecione o arquivo PDF do ETP", type="pdf", key="u2")
-                
                 if file_etp and st.button("AUDITAR ARQUIVO (1 Crédito)", key="b2"):
                     questions = [
-                        ("1. Análise da Necessidade", "O ETP descreve a NECESSIDADE da contratação de forma clara? (Inciso I)"),
-                        ("2. Levantamento de Mercado", "Houve LEVANTAMENTO DE MERCADO e análise de alternativas? (Inciso III)"),
-                        ("3. Estimativa e Orçamento", "Há ESTIMATIVA DO VALOR e adequação orçamentária? (Inciso VI e VII)"),
-                        ("4. Justificativa da Solução", "A ESCOLHA DA SOLUÇÃO foi justificada técnica e economicamente? (Inciso VIII)")
+                        ("1. Análise da Necessidade", "O texto descreve a NECESSIDADE da contratação de forma clara? (Inciso I)"),
+                        ("2. Levantamento de Mercado", "O texto comprova que houve LEVANTAMENTO DE MERCADO e análise de alternativas? (Inciso III)"),
+                        ("3. Estimativa e Orçamento", "O texto apresenta a ESTIMATIVA DO VALOR e adequação orçamentária? (Inciso VI e VII)"),
+                        ("4. Justificativa da Solução", "A ESCOLHA DA SOLUÇÃO foi justificada no texto? (Inciso VIII)")
                     ]
                     st.session_state['result_etp'] = process_audit(vectorstore, file_etp, "ETP", questions)
                 
@@ -244,13 +246,12 @@ def main():
             # --- ABA 3: TR ---
             with tab3:
                 file_tr = st.file_uploader("Selecione o arquivo PDF do TR", type="pdf", key="u3")
-                
                 if file_tr and st.button("AUDITAR ARQUIVO (1 Crédito)", key="b3"):
                     questions = [
-                        ("1. Definição do Objeto", "A definição do OBJETO é precisa, suficiente e clara? Há vedação de marca? (Inciso XXIII, 'a')"),
-                        ("2. Modelo de Execução", "O MODELO DE EXECUÇÃO do objeto está claro? (Inciso XXIII, 'e')"),
-                        ("3. Medição e Pagamento", "Os CRITÉRIOS DE MEDIÇÃO E PAGAMENTO estão definidos objetivamente? (Inciso XXIII, 'h')"),
-                        ("4. Fiscalização", "Há previsão de FISCALIZAÇÃO e critérios de recebimento? (Inciso XXIII, 'g')")
+                        ("1. Definição do Objeto", "A definição do OBJETO no texto é precisa e suficiente? Há vedação de marca?"),
+                        ("2. Modelo de Execução", "O texto detalha o MODELO DE EXECUÇÃO do objeto?"),
+                        ("3. Medição e Pagamento", "Os CRITÉRIOS DE MEDIÇÃO E PAGAMENTO estão escritos no texto?"),
+                        ("4. Fiscalização", "Há cláusula de FISCALIZAÇÃO e critérios de recebimento no texto?")
                     ]
                     st.session_state['result_tr'] = process_audit(vectorstore, file_tr, "TR", questions)
                 
