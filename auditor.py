@@ -27,8 +27,20 @@ st.markdown("""
 if 'result_edital' not in st.session_state: st.session_state['result_edital'] = None
 if 'result_etp' not in st.session_state: st.session_state['result_etp'] = None
 if 'result_tr' not in st.session_state: st.session_state['result_tr'] = None
+if 'logged' not in st.session_state: st.session_state['logged'] = False
+if 'user_credits' not in st.session_state: st.session_state['user_credits'] = 0
 
-# --- 1. CARREGAMENTO DUPLO (LEI + JURISPRUDÊNCIA) ---
+# --- 1. FUNÇÃO DE LOGIN (RESTAURADA) ---
+def check_login(key):
+    # SEU BANCO DE USUÁRIOS
+    users = {
+        "AMIGO_TESTE": 3,
+        "PREFEITURA_X": 10,
+        "GUSTAVO_ADMIN": 99
+    }
+    return users.get(key, -1)
+
+# --- 2. CARREGAMENTO DUPLO (LEI + JURISPRUDÊNCIA) ---
 @st.cache_resource(show_spinner=False)
 def load_knowledge_base():
     text = ""
@@ -65,7 +77,7 @@ def load_knowledge_base():
     vectorstore = FAISS.from_texts(texts=chunks, embedding=embeddings)
     return vectorstore, files_log
 
-# --- 2. CÉREBRO JURÍDICO (PROMPTS RIGOROSOS) ---
+# --- 3. CÉREBRO JURÍDICO (PROMPTS RIGOROSOS) ---
 def get_specialized_chain(doc_type):
     
     # PROMPT DO EDITAL (COM AS SUAS REGRAS)
@@ -155,11 +167,11 @@ def get_specialized_chain(doc_type):
         """
 
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-    model = ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=api_key) # Mudei para GPT-4o (Mais inteligente)
+    model = ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=api_key) 
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
     return load_qa_chain(model, chain_type="stuff", prompt=prompt)
 
-# --- 3. EXECUÇÃO DA AUDITORIA ---
+# --- 4. EXECUÇÃO DA AUDITORIA ---
 def process_audit(vectorstore, uploaded_file, doc_type, questions_list):
     reader = PdfReader(uploaded_file)
     doc_text = ""
@@ -172,24 +184,13 @@ def process_audit(vectorstore, uploaded_file, doc_type, questions_list):
     status = st.empty()
     progress = st.progress(0)
     
-    # Adiciona o texto do documento auditado ao contexto da busca para a IA ler ele + a Lei
-    # Truque: Criamos um "mini vectorstore" temporário só com o documento atual se fosse muito grande,
-    # mas aqui vamos mandar o texto cru no prompt para garantir que ela LEIA TUDO.
-    
-    full_audit_report = "" # Para o relatório final
+    full_audit_report = "" 
     
     for i, (titulo, pergunta_tecnica) in enumerate(questions_list):
         status.text(f"Auditando: {titulo}...")
         
-        # BUSCA HÍBRIDA: Pega trechos da Lei (Vectorstore) + Texto do PDF (Contexto Local)
+        # BUSCA HÍBRIDA
         docs_lei = vectorstore.similarity_search(pergunta_tecnica, k=4)
-        
-        # O Pulo do Gato: Mandamos o texto do PDF + A Lei achada para a IA cruzar
-        input_content = f"DOCUMENTO SOB ANÁLISE:\n{doc_text[:12000]}...\n\nBASE LEGAL:\n{docs_lei}"
-        
-        # Como o input_documents espera objetos Document, fazemos um bypass simples ou usamos a chain direta.
-        # Aqui, vamos manter a chain mas passar o contexto montado manualmente se precisar.
-        # Ajuste para simplicidade: Usamos os docs da lei como 'input_documents' mas injetamos o texto do PDF na 'question'.
         
         query_final = f"DOCUMENTO DO USUÁRIO (TEXTO REAL): {doc_text[:10000]} \n\n PERGUNTA: {pergunta_tecnica}"
         
@@ -199,7 +200,7 @@ def process_audit(vectorstore, uploaded_file, doc_type, questions_list):
         full_audit_report += f"\n- {titulo}: {resp}"
         progress.progress((i + 1) / len(questions_list))
     
-    # GERAÇÃO DO RESUMO FINAL (CONCLUSÃO)
+    # GERAÇÃO DO RESUMO FINAL
     status.text("Gerando Relatório Conclusivo...")
     final_prompt = f"""
     Com base nas análises acima:
@@ -210,39 +211,59 @@ def process_audit(vectorstore, uploaded_file, doc_type, questions_list):
     2. Alertas Vermelhos (Ilegalidades/Restrições).
     3. Conclusão: O documento está apto ou precisa de correção?
     """
-    # Usamos a mesma chain para concluir (gambiarra funcional)
     conclusao = chain.run(input_documents=docs_lei, question=final_prompt)
     results.append(("🏁 CONCLUSÃO FINAL DO AUDITOR", conclusao))
     
     status.empty()
     return results
 
-# --- 4. TELA PRINCIPAL ---
+# --- 5. TELA PRINCIPAL (LOGIN RESTAURADO) ---
 def main():
-    st.title("🏛️ AguiarGov - Auditor Fiscal (v5.0)")
+    st.title("🏛️ AguiarGov - Auditor Fiscal (v5.1)")
     
-    # LOGIN SIMPLIFICADO
+    # BARRA LATERAL COM LOGIN
     with st.sidebar:
-        st.header("Acesso")
-        if st.text_input("Senha", type="password") == "admin123":
-            st.session_state['logged'] = True
-            st.success("Logado")
-    
-    if st.session_state.get('logged'):
+        st.header("🔐 Acesso Restrito")
+        
+        if not st.session_state['logged']:
+            key = st.text_input("Digite sua Senha", type="password")
+            if st.button("Entrar"):
+                credits = check_login(key)
+                if credits > -1:
+                    st.session_state['logged'] = True
+                    st.session_state['user_credits'] = credits
+                    st.session_state['user_key'] = key
+                    st.rerun() # Recarrega a página para sumir o login
+                else:
+                    st.error("Senha inválida.")
+        else:
+            st.success(f"Logado: {st.session_state.get('user_key')}")
+            st.info(f"Créditos: {st.session_state.get('user_credits')}")
+            if st.button("Sair"):
+                st.session_state['logged'] = False
+                st.rerun()
+
+    # CONTEÚDO PRINCIPAL (SÓ APARECE SE LOGADO)
+    if st.session_state['logged']:
         # Carrega base
-        if 'vectorstore' not in st.session_state:
+        if 'vectorstore' not in st.session_state or st.session_state['vectorstore'] is None:
             with st.spinner("Carregando Leis e Jurisprudência..."):
                 vs, logs = load_knowledge_base()
                 st.session_state['vectorstore'] = vs
-                if vs is None: st.error(f"Erro: {logs}")
+                if vs is None: 
+                    st.error(f"Erro: {logs}")
+                elif st.session_state['user_key'] == "GUSTAVO_ADMIN":
+                    with st.expander("🕵️ Logs do Sistema"):
+                         for log in logs: st.write(log)
         
         vs = st.session_state.get('vectorstore')
         
         if vs:
-            # MENU LATERAL (SUBSTITUINDO ABAS PARA EVITAR REFRESH)
+            # MENU DE DOCUMENTOS
             modo = st.sidebar.radio("Selecione o Documento:", ["EDITAL", "ETP", "TR (Serviços)", "PROJETO BÁSICO (Obras)"])
             
-            uploaded = st.file_uploader(f"Suba o {modo} (PDF)", type="pdf")
+            st.subheader(f"Auditoria de {modo}")
+            uploaded = st.file_uploader(f"Suba o PDF do {modo}", type="pdf")
             
             if uploaded and st.button("AUDITAR AGORA"):
                 
