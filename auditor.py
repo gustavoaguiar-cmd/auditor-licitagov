@@ -1,7 +1,8 @@
 import streamlit as st
 import os
 from PyPDF2 import PdfReader
-from langchain.text_splitter import CharacterTextSplitter
+# TROCAMOS O SPLITTER PARA UM MAIS ROBUSTO
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.chains.question_answering import load_qa_chain
@@ -30,9 +31,8 @@ if 'result_tr' not in st.session_state: st.session_state['result_tr'] = None
 if 'logged' not in st.session_state: st.session_state['logged'] = False
 if 'user_credits' not in st.session_state: st.session_state['user_credits'] = 0
 
-# --- 1. FUNÇÃO DE LOGIN (RESTAURADA) ---
+# --- 1. FUNÇÃO DE LOGIN ---
 def check_login(key):
-    # SEU BANCO DE USUÁRIOS
     users = {
         "AMIGO_TESTE": 3,
         "PREFEITURA_X": 10,
@@ -63,13 +63,25 @@ def load_knowledge_base():
                             text += f"\n[FONTE: {filename}] {page_text}"
                     files_log.append(f"✅ Lido: {filename}")
                 except Exception:
+                    files_log.append(f"❌ Erro ao ler: {filename}")
                     continue
     
     if text == "": return None, files_log
 
-    text_splitter = CharacterTextSplitter(separator="\n", chunk_size=1500, chunk_overlap=300)
-    chunks = text_splitter.split_text(text)
+    # CORREÇÃO DO ERRO (Bad Request): USANDO RECURSIVE E FILTRANDO VAZIOS
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=2000,
+        chunk_overlap=200,
+        separators=["\n\n", "\n", " ", ""]
+    )
+    chunks_raw = text_splitter.split_text(text)
     
+    # FILTRO CRÍTICO: REMOVE CHUNKS VAZIOS QUE TRAVAM A API
+    chunks = [c for c in chunks_raw if c.strip()]
+    
+    if not chunks:
+        return None, ["ERRO: Texto vazio após processamento."]
+
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key: return None, ["ERRO: Chave API ausente."]
     
@@ -219,7 +231,7 @@ def process_audit(vectorstore, uploaded_file, doc_type, questions_list):
 
 # --- 5. TELA PRINCIPAL (LOGIN RESTAURADO) ---
 def main():
-    st.title("🏛️ AguiarGov - Auditor Fiscal (v5.1)")
+    st.title("🏛️ AguiarGov - Auditor Fiscal (v5.2)")
     
     # BARRA LATERAL COM LOGIN
     with st.sidebar:
@@ -233,7 +245,7 @@ def main():
                     st.session_state['logged'] = True
                     st.session_state['user_credits'] = credits
                     st.session_state['user_key'] = key
-                    st.rerun() # Recarrega a página para sumir o login
+                    st.rerun() 
                 else:
                     st.error("Senha inválida.")
         else:
