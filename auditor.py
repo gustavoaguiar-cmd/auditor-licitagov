@@ -1,7 +1,6 @@
 import streamlit as st
 import os
 from PyPDF2 import PdfReader
-# TROCAMOS O SPLITTER PARA UM MAIS ROBUSTO
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
@@ -59,8 +58,10 @@ def load_knowledge_base():
                     for page in pdf_reader.pages:
                         page_text = page.extract_text()
                         if page_text:
-                            # Adiciona metadados manuais no texto para a IA saber a fonte
-                            text += f"\n[FONTE: {filename}] {page_text}"
+                            # --- CORREÇÃO DO ERRO (NULL BYTES) ---
+                            # Remove caracteres nulos que quebram a OpenAI
+                            clean_page = page_text.replace('\x00', '')
+                            text += f"\n[FONTE: {filename}] {clean_page}"
                     files_log.append(f"✅ Lido: {filename}")
                 except Exception:
                     files_log.append(f"❌ Erro ao ler: {filename}")
@@ -68,26 +69,31 @@ def load_knowledge_base():
     
     if text == "": return None, files_log
 
-    # CORREÇÃO DO ERRO (Bad Request): USANDO RECURSIVE E FILTRANDO VAZIOS
+    # CONFIGURAÇÃO DE SPLITTER SEGURA
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=2000,
         chunk_overlap=200,
-        separators=["\n\n", "\n", " ", ""]
+        separators=["\n\n", "\n", ".", " ", ""]
     )
     chunks_raw = text_splitter.split_text(text)
     
-    # FILTRO CRÍTICO: REMOVE CHUNKS VAZIOS QUE TRAVAM A API
-    chunks = [c for c in chunks_raw if c.strip()]
+    # FILTRO RIGOROSO: Remove vazios e textos muito curtos (lixo de PDF)
+    chunks = [c for c in chunks_raw if c and len(c.strip()) > 10]
     
     if not chunks:
-        return None, ["ERRO: Texto vazio após processamento."]
+        return None, ["ERRO: Texto vazio ou corrompido após processamento."]
 
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key: return None, ["ERRO: Chave API ausente."]
     
-    embeddings = OpenAIEmbeddings(openai_api_key=api_key)
-    vectorstore = FAISS.from_texts(texts=chunks, embedding=embeddings)
-    return vectorstore, files_log
+    # Adicionamos chunk_size=100 para evitar timeout no envio
+    embeddings = OpenAIEmbeddings(openai_api_key=api_key, chunk_size=100)
+    
+    try:
+        vectorstore = FAISS.from_texts(texts=chunks, embedding=embeddings)
+        return vectorstore, files_log
+    except Exception as e:
+        return None, [f"ERRO CRÍTICO NA OPENAI: {str(e)}"]
 
 # --- 3. CÉREBRO JURÍDICO (PROMPTS RIGOROSOS) ---
 def get_specialized_chain(doc_type):
@@ -188,7 +194,10 @@ def process_audit(vectorstore, uploaded_file, doc_type, questions_list):
     reader = PdfReader(uploaded_file)
     doc_text = ""
     for page in reader.pages:
-        doc_text += page.extract_text()
+        extracted = page.extract_text()
+        if extracted:
+             # Limpeza também no arquivo de upload para garantir
+             doc_text += extracted.replace('\x00', '')
     
     chain = get_specialized_chain(doc_type)
     results = []
@@ -206,7 +215,10 @@ def process_audit(vectorstore, uploaded_file, doc_type, questions_list):
         
         query_final = f"DOCUMENTO DO USUÁRIO (TEXTO REAL): {doc_text[:10000]} \n\n PERGUNTA: {pergunta_tecnica}"
         
-        resp = chain.run(input_documents=docs_lei, question=query_final)
+        try:
+            resp = chain.run(input_documents=docs_lei, question=query_final)
+        except Exception as e:
+            resp = f"Erro na análise deste item: {str(e)}"
         
         results.append((titulo, resp))
         full_audit_report += f"\n- {titulo}: {resp}"
@@ -229,9 +241,9 @@ def process_audit(vectorstore, uploaded_file, doc_type, questions_list):
     status.empty()
     return results
 
-# --- 5. TELA PRINCIPAL (LOGIN RESTAURADO) ---
+# --- 5. TELA PRINCIPAL ---
 def main():
-    st.title("🏛️ AguiarGov - Auditor Fiscal (v5.2)")
+    st.title("🏛️ AguiarGov - Auditor Fiscal (v5.3)")
     
     # BARRA LATERAL COM LOGIN
     with st.sidebar:
@@ -255,18 +267,23 @@ def main():
                 st.session_state['logged'] = False
                 st.rerun()
 
-    # CONTEÚDO PRINCIPAL (SÓ APARECE SE LOGADO)
+    # CONTEÚDO PRINCIPAL
     if st.session_state['logged']:
-        # Carrega base
+        
+        # Carrega base com tratamento de erros
         if 'vectorstore' not in st.session_state or st.session_state['vectorstore'] is None:
             with st.spinner("Carregando Leis e Jurisprudência..."):
                 vs, logs = load_knowledge_base()
-                st.session_state['vectorstore'] = vs
                 if vs is None: 
-                    st.error(f"Erro: {logs}")
-                elif st.session_state['user_key'] == "GUSTAVO_ADMIN":
-                    with st.expander("🕵️ Logs do Sistema"):
+                    # Se der erro, mostra o log do erro para debug
+                    st.error("Falha no carregamento da Base de Dados.")
+                    with st.expander("Ver Erro Técnico"):
                          for log in logs: st.write(log)
+                else:
+                    st.session_state['vectorstore'] = vs
+                    if st.session_state['user_key'] == "GUSTAVO_ADMIN":
+                        with st.expander("🕵️ Logs do Sistema"):
+                             for log in logs: st.write(log)
         
         vs = st.session_state.get('vectorstore')
         
