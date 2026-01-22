@@ -1,7 +1,6 @@
 import streamlit as st
 import os
 from PyPDF2 import PdfReader
-# VERSÃO ESTÁVEL LANGCHAIN 0.1
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
@@ -9,307 +8,294 @@ from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
 
 # Configuração da Página
-st.set_page_config(page_title="LicitaGov - Auditor IA", page_icon="⚖️", layout="wide")
+st.set_page_config(page_title="AguiarGov - Auditor Fiscal", page_icon="⚖️", layout="wide")
 
-# --- INICIALIZAR MEMÓRIA (SESSION STATE) ---
-if 'result_edital' not in st.session_state:
-    st.session_state['result_edital'] = None
-if 'result_etp' not in st.session_state:
-    st.session_state['result_etp'] = None
-if 'result_tr' not in st.session_state:
-    st.session_state['result_tr'] = None
+# --- CSS PARA ALERTAS VERMELHOS ---
+st.markdown("""
+<style>
+.alert-box {
+    background-color: #ffdddd;
+    border-left: 6px solid #f44336;
+    padding: 10px;
+    margin-bottom: 15px;
+    color: #333;
+}
+</style>
+""", unsafe_allow_html=True)
 
-# --- 1. CARREGAMENTO DA BASE JURÍDICA ---
+# --- INICIALIZAR MEMÓRIA ---
+if 'result_edital' not in st.session_state: st.session_state['result_edital'] = None
+if 'result_etp' not in st.session_state: st.session_state['result_etp'] = None
+if 'result_tr' not in st.session_state: st.session_state['result_tr'] = None
+
+# --- 1. CARREGAMENTO DUPLO (LEI + JURISPRUDÊNCIA) ---
 @st.cache_resource(show_spinner=False)
 def load_knowledge_base():
     text = ""
     data_folder = "data"
-    files_processed = 0
-    debug_log = [] 
     
     if not os.path.exists(data_folder):
-        return None, 0, ["ERRO: Pasta 'data' não encontrada."]
+        return None, ["ERRO: Pasta 'data' não encontrada."]
 
+    files_log = []
     for root, dirs, files in os.walk(data_folder):
         for filename in files:
             if filename.lower().endswith('.pdf'):
                 filepath = os.path.join(root, filename)
                 try:
                     pdf_reader = PdfReader(filepath)
-                    file_text = ""
                     for page in pdf_reader.pages:
                         page_text = page.extract_text()
                         if page_text:
-                            file_text += page_text
-                    
-                    if file_text:
-                        text += file_text
-                        files_processed += 1
-                        folder_name = os.path.basename(root)
-                        debug_log.append(f"✅ Lido ({folder_name}): {filename}")
+                            # Adiciona metadados manuais no texto para a IA saber a fonte
+                            text += f"\n[FONTE: {filename}] {page_text}"
+                    files_log.append(f"✅ Lido: {filename}")
                 except Exception:
                     continue
     
-    if text == "":
-        return None, 0, debug_log
+    if text == "": return None, files_log
 
-    text_splitter = CharacterTextSplitter(separator="\n", chunk_size=1000, chunk_overlap=200, length_function=len)
+    text_splitter = CharacterTextSplitter(separator="\n", chunk_size=1500, chunk_overlap=300)
     chunks = text_splitter.split_text(text)
     
-    if "OPENAI_API_KEY" in st.secrets:
-        api_key = st.secrets["OPENAI_API_KEY"]
-    else:
-        api_key = os.getenv("OPENAI_API_KEY")
-
-    if not api_key:
-        return None, 0, ["ERRO: Chave API ausente."]
+    api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if not api_key: return None, ["ERRO: Chave API ausente."]
     
     embeddings = OpenAIEmbeddings(openai_api_key=api_key)
     vectorstore = FAISS.from_texts(texts=chunks, embedding=embeddings)
-    return vectorstore, files_processed, debug_log
+    return vectorstore, files_log
 
-# --- 2. CÉREBRO ESPECIALISTA ---
+# --- 2. CÉREBRO JURÍDICO (PROMPTS RIGOROSOS) ---
 def get_specialized_chain(doc_type):
     
+    # PROMPT DO EDITAL (COM AS SUAS REGRAS)
     if doc_type == "EDITAL":
         prompt_template = """
-        Você é um Auditor Rigoroso de Licitações (Controle Externo).
-        Analise o EDITAL fornecido.
+        Você é um Auditor de Controle Externo do Tribunal de Contas (TCU/TCE).
+        Sua missão é blindar o EDITAL de licitação.
         
-        REQUISITOS LEGAIS:
-        1. Lei 14.133/21 (Art. 25).
-        2. Jurisprudência: Prejulgados do TCE/ES e Acórdãos do TCU.
+        REGRAS DE OURO (CHECKLIST):
+        1. Aspectos Legais: Objeto claro, critério de julgamento, lei regente (14.133), minuta de contrato anexa.
+        2. Habilitação (Art. 62-70): Exigências devem ser PROPORCIONAIS. 
+           - ALERTA: Sede no município, vistoria obrigatória sem justificativa ou capital social > 10% são ILEGAIS.
+           - Certidões: Apenas as previstas em lei.
+        3. Orçamento: Se não estiver no edital, verifique se há menção ao Anexo/TR. Não diga que é ilegal se estiver referenciado.
+        4. JURISPRUDÊNCIA: Cite Acórdãos do TCU ou Prejulgados do TCE/ES se houver violação.
         
-        PERGUNTA DA AUDITORIA: {question}
+        PERGUNTA: {question}
         
-        REGRAS CRÍTICAS:
-        - Responda estritamente com base no texto do documento.
-        - Se não encontrar o item, diga: "OMISSÃO: Item não localizado no edital."
-        - Cite o artigo da lei violado ou atendido.
-        - NÃO COLOQUE ASSINATURA.
+        CONTEXTO LEGAL E DO DOCUMENTO:
+        {context}
         
-        Contexto Legal: {context}
-        PARECER TÉCNICO:
+        PARECER DO AUDITOR:
+        - Responda de forma direta.
+        - Se identificar cláusula restritiva, inicie com "🚨 ALERTA VERMELHO:".
+        - Cite o artigo da Lei 14.133 violado ou atendido.
+        - Se faltar jurisprudência no contexto, use seu conhecimento de base sobre Súmulas do TCU.
         """
 
+    # PROMPT DO ETP (ART. 18 NA VEIA)
     elif doc_type == "ETP":
         prompt_template = """
         Você é um Auditor de Planejamento.
-        Analise o ETP com base RIGOROSA no Art. 18, §1º da Lei 14.133/21.
+        Analise o ETP estritamente conforme o Art. 18, §1º da Lei 14.133/21.
         
-        PERGUNTA DA AUDITORIA: {question}
+        ITENS OBRIGATÓRIOS:
+        I - Necessidade (Interesse Público)
+        II - Previsão no Plano Anual (PCA)
+        VI - Estimativa de Valor (com memória)
+        VIII - Justificativa de Parcelamento (Súmula 247 TCU)
+        XIII - Posicionamento Conclusivo
         
-        REGRAS CRÍTICAS:
-        - Verifique os incisos do Art. 18.
-        - Se o texto não trouxer a informação explicita, aponte como OMISSÃO.
-        - NÃO COLOQUE ASSINATURA.
+        PERGUNTA: {question}
         
-        Contexto Legal: {context}
-        PARECER SOBRE O ETP:
+        CONTEXTO: {context}
+        
+        PARECER:
+        Verifique se o texto atende ao inciso. Se for vago, critique. Cite a jurisprudência se aplicável.
         """
 
-    elif doc_type == "TR_SERVICO": # NOVO: Só para Serviços Comuns
+    # PROMPT DO TR (ART. 6 XXIII)
+    elif doc_type == "TR":
         prompt_template = """
         Você é um Auditor de Licitações.
-        Analise o Termo de Referência (TR) para BENS OU SERVIÇOS COMUNS.
-        Base Legal: Art. 6º, XXIII da Lei 14.133/21.
+        Analise o TR conforme Art. 6º, XXIII da Lei 14.133/21.
         
-        PERGUNTA DA AUDITORIA: {question}
+        VERIFIQUE:
+        - Definição do Objeto e Quantitativos.
+        - Fundamentação (Referência ao ETP).
+        - Modelo de Execução e Gestão do Contrato.
+        - Critérios de Pagamento e Medição.
+        - Adequação Orçamentária.
         
-        REGRAS CRÍTICAS:
-        - Busque a evidência APENAS no texto.
-        - Não exija itens de engenharia (como BDI ou Projeto Básico) pois é um Serviço Comum.
-        - Se não encontrar, diga: "OMISSÃO".
-        - NÃO COLOQUE ASSINATURA.
+        PERGUNTA: {question}
+        CONTEXTO: {context}
         
-        Contexto Legal: {context}
-        PARECER SOBRE O TR:
+        PARECER:
+        Se faltar detalhe técnico (ex: prazo de garantia, SLA), aponte como falha.
         """
-        
-    else: # PROJETO BÁSICO (OBRAS)
+    
+    # PROMPT DO PROJETO BÁSICO (OBRAS)
+    else: 
         prompt_template = """
-        Você é um Auditor de Engenharia (Obras Públicas).
-        Analise o PROJETO BÁSICO DE ENGENHARIA.
-        Base Legal: Lei 14.133/21 (Art. 6º, XXV) e Decreto 7.983/13.
+        Você é um Engenheiro Auditor do TCE.
+        Analise o PROJETO BÁSICO (Obras) conforme Art. 6º, XXV da Lei 14.133 e Decreto 7.983/13.
         
-        PERGUNTA DA AUDITORIA: {question}
+        EXIGÊNCIAS:
+        - Sondagens, Topografia e Estudos Geotécnicos (Obrigatório).
+        - Orçamento Detalhado (Curva ABC + BDI discriminado).
+        - Matriz de Riscos (Obras de Grande Vulto).
+        - Cronograma Físico-Financeiro.
         
-        REGRAS CRÍTICAS:
-        - Exija rigorosamente BDI, Curva ABC, Cronograma e Sondagens se aplicável.
-        - Verifique alinhamento com SINAPI/SICRO.
-        - NÃO COLOQUE ASSINATURA.
+        PERGUNTA: {question}
+        CONTEXTO: {context}
         
-        Contexto Legal: {context}
-        PARECER SOBRE O PROJETO BÁSICO:
+        PARECER:
+        Se faltar BDI ou Cronograma, emita ALERTA VERMELHO de inexecutabilidade.
         """
 
-    if "OPENAI_API_KEY" in st.secrets:
-        api_key = st.secrets["OPENAI_API_KEY"]
-    else:
-        api_key = os.getenv("OPENAI_API_KEY")
-
-    model = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=api_key)
+    api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    model = ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=api_key) # Mudei para GPT-4o (Mais inteligente)
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
     return load_qa_chain(model, chain_type="stuff", prompt=prompt)
 
-# --- 3. LOGIN ---
-def check_login(key):
-    users = {
-        "AMIGO_TESTE": 3,
-        "PREFEITURA_X": 10,
-        "GUSTAVO_ADMIN": 99
-    }
-    return users.get(key, -1)
-
-# --- 4. PROCESSAMENTO ---
+# --- 3. EXECUÇÃO DA AUDITORIA ---
 def process_audit(vectorstore, uploaded_file, doc_type, questions_list):
     reader = PdfReader(uploaded_file)
     doc_text = ""
     for page in reader.pages:
         doc_text += page.extract_text()
     
-    if len(doc_text) < 50:
-        return [("Erro de Leitura", "O arquivo PDF parece ser uma imagem ou está vazio.")]
-
     chain = get_specialized_chain(doc_type)
     results = []
     
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+    status = st.empty()
+    progress = st.progress(0)
     
-    for i, (titulo_bonito, prompt_tecnico) in enumerate(questions_list):
-        status_text.text(f"Auditando: {titulo_bonito}...")
-        docs = vectorstore.similarity_search(prompt_tecnico)
-        
-        resp = chain.run(input_documents=docs, question=f"Texto do Documento (FONTE DA VERDADE): {doc_text[:7000]}... TAREFA: {prompt_tecnico}")
-        
-        results.append((titulo_bonito, resp))
-        progress_bar.progress((i + 1) / len(questions_list))
+    # Adiciona o texto do documento auditado ao contexto da busca para a IA ler ele + a Lei
+    # Truque: Criamos um "mini vectorstore" temporário só com o documento atual se fosse muito grande,
+    # mas aqui vamos mandar o texto cru no prompt para garantir que ela LEIA TUDO.
     
-    status_text.text("Auditoria Concluída!")
+    full_audit_report = "" # Para o relatório final
+    
+    for i, (titulo, pergunta_tecnica) in enumerate(questions_list):
+        status.text(f"Auditando: {titulo}...")
+        
+        # BUSCA HÍBRIDA: Pega trechos da Lei (Vectorstore) + Texto do PDF (Contexto Local)
+        docs_lei = vectorstore.similarity_search(pergunta_tecnica, k=4)
+        
+        # O Pulo do Gato: Mandamos o texto do PDF + A Lei achada para a IA cruzar
+        input_content = f"DOCUMENTO SOB ANÁLISE:\n{doc_text[:12000]}...\n\nBASE LEGAL:\n{docs_lei}"
+        
+        # Como o input_documents espera objetos Document, fazemos um bypass simples ou usamos a chain direta.
+        # Aqui, vamos manter a chain mas passar o contexto montado manualmente se precisar.
+        # Ajuste para simplicidade: Usamos os docs da lei como 'input_documents' mas injetamos o texto do PDF na 'question'.
+        
+        query_final = f"DOCUMENTO DO USUÁRIO (TEXTO REAL): {doc_text[:10000]} \n\n PERGUNTA: {pergunta_tecnica}"
+        
+        resp = chain.run(input_documents=docs_lei, question=query_final)
+        
+        results.append((titulo, resp))
+        full_audit_report += f"\n- {titulo}: {resp}"
+        progress.progress((i + 1) / len(questions_list))
+    
+    # GERAÇÃO DO RESUMO FINAL (CONCLUSÃO)
+    status.text("Gerando Relatório Conclusivo...")
+    final_prompt = f"""
+    Com base nas análises acima:
+    {full_audit_report}
+    
+    Gere um RESUMO EXECUTIVO final listando APENAS:
+    1. Itens Omitidos (O que falta).
+    2. Alertas Vermelhos (Ilegalidades/Restrições).
+    3. Conclusão: O documento está apto ou precisa de correção?
+    """
+    # Usamos a mesma chain para concluir (gambiarra funcional)
+    conclusao = chain.run(input_documents=docs_lei, question=final_prompt)
+    results.append(("🏁 CONCLUSÃO FINAL DO AUDITOR", conclusao))
+    
+    status.empty()
     return results
 
-# --- 5. EXIBIÇÃO ---
-def display_results(results_list, doc_type):
-    if results_list:
-        st.markdown(f"### 📋 Relatório: {doc_type}")
-        for titulo, resposta in results_list:
-            with st.chat_message("assistant"):
-                st.markdown(f"**{titulo}**")
-                st.write(resposta)
-
-# --- 6. TELA PRINCIPAL ---
+# --- 4. TELA PRINCIPAL ---
 def main():
-    st.title("🏛️ AguiarGov - Auditor IA")
-    st.markdown("---")
+    st.title("🏛️ AguiarGov - Auditor Fiscal (v5.0)")
     
+    # LOGIN SIMPLIFICADO
     with st.sidebar:
-        st.header("🔐 Acesso")
-        key = st.text_input("Senha", type="password")
-        if key:
-            credits = check_login(key)
-            if credits > -1:
-                st.session_state['logged'] = True
-                st.session_state['user_key'] = key
-                st.success(f"Logado. Créditos: {credits}")
-            else:
-                st.error("Senha inválida.")
+        st.header("Acesso")
+        if st.text_input("Senha", type="password") == "admin123":
+            st.session_state['logged'] = True
+            st.success("Logado")
     
     if st.session_state.get('logged'):
-        with st.spinner("Carregando Base Jurídica..."):
-            vectorstore, qtd, logs = load_knowledge_base()
+        # Carrega base
+        if 'vectorstore' not in st.session_state:
+            with st.spinner("Carregando Leis e Jurisprudência..."):
+                vs, logs = load_knowledge_base()
+                st.session_state['vectorstore'] = vs
+                if vs is None: st.error(f"Erro: {logs}")
         
-        if st.session_state.get('user_key') == "GUSTAVO_ADMIN" and qtd > 0:
-             with st.expander("🕵️ Logs do Admin"):
-                for log in logs: st.write(log)
+        vs = st.session_state.get('vectorstore')
         
-        if vectorstore:
-            tab1, tab2, tab3 = st.tabs(["📄 EDITAL", "📘 ETP", "📋 TR / P. BÁSICO"])
+        if vs:
+            # MENU LATERAL (SUBSTITUINDO ABAS PARA EVITAR REFRESH)
+            modo = st.sidebar.radio("Selecione o Documento:", ["EDITAL", "ETP", "TR (Serviços)", "PROJETO BÁSICO (Obras)"])
             
-            # --- ABA 1: EDITAL ---
-            with tab1:
-                file_edital = st.file_uploader("Suba o EDITAL", type="pdf", key="u1")
-                if file_edital and st.button("AUDITAR EDITAL", key="b1"):
-                    questions = [
-                        ("1. Objeto e Regras (Art. 25)", "O edital contém objeto, julgamento, habilitação e recursos conforme Art. 25?"),
-                        ("2. Minuta e Divulgação", "Foi utilizada minuta padronizada e prevista divulgação em sítio eletrônico?"),
-                        ("3. Orçamento e Reajuste", "Há orçamento estimado e previsão OBRIGATÓRIA de índice de reajustamento?"),
-                        ("4. Matriz de Riscos", "Há previsão de Matriz de Riscos ou Programa de Integridade (se aplicável)?"),
-                        ("5. Habilitação", "A habilitação respeita a Lei 14.133 (Art 62 a 70)?")
+            uploaded = st.file_uploader(f"Suba o {modo} (PDF)", type="pdf")
+            
+            if uploaded and st.button("AUDITAR AGORA"):
+                
+                if modo == "EDITAL":
+                    qs = [
+                        ("1. Objeto e Fundamentação", "O objeto está claro e sem direcionamento? A Lei 14.133 foi citada?"),
+                        ("2. Habilitação (Restrições)", "Há exigências restritivas (sede local, capital > 10%, vistoria obrigatória)? Verifique Art. 62-70."),
+                        ("3. Qualificação Técnica", "Os atestados exigidos são compatíveis e proporcionais?"),
+                        ("4. Orçamento e Reajuste", "Há orçamento estimado ou referência ao TR? Há cláusula de reajuste obrigatória?"),
+                        ("5. Prazos e Modos de Disputa", "Os prazos de publicidade e modo de disputa (aberto/fechado) estão corretos?")
                     ]
-                    st.session_state['result_edital'] = process_audit(vectorstore, file_edital, "EDITAL", questions)
+                    res = process_audit(vs, uploaded, "EDITAL", qs)
                 
-                if st.session_state['result_edital']:
-                    display_results(st.session_state['result_edital'], "EDITAL")
-
-            # --- ABA 2: ETP ---
-            with tab2:
-                file_etp = st.file_uploader("Suba o ETP", type="pdf", key="u2")
-                if file_etp and st.button("AUDITAR ETP", key="b2"):
-                    questions = [
-                        ("1. Necessidade (Inciso I)", "Descrição da necessidade sob a perspectiva do interesse público?"),
-                        ("2. Plano de Contratações (Inciso II)", "Previsão no Plano de Contratações Anual?"),
-                        ("3. Requisitos (Inciso III)", "Definição dos requisitos da contratação?"),
-                        ("4. Quantidades (Inciso IV)", "Estimativas das quantidades com memórias de cálculo?"),
-                        ("5. Mercado (Inciso V)", "Levantamento de mercado e análise de alternativas?"),
-                        ("6. Valor (Inciso VI)", "Estimativa do valor com preços unitários?"),
-                        ("7. Solução (Inciso VII)", "Descrição da solução como um todo?"),
-                        ("8. Parcelamento (Inciso VIII)", "Justificativas para o parcelamento ou não?"),
-                        ("9. Resultados (Inciso IX)", "Demonstrativo dos resultados pretendidos?"),
-                        ("10. Providências (Inciso X)", "Providências prévias ao contrato?"),
-                        ("11. Correlatas (Inciso XI)", "Contratações correlatas/interdependentes?"),
-                        ("12. Ambiental (Inciso XII)", "Impactos ambientais e medidas mitigadoras?"),
-                        ("13. Viabilidade (Inciso XIII)", "Posicionamento conclusivo sobre viabilidade?")
+                elif modo == "ETP":
+                    qs = [
+                        ("1. Necessidade e PCA", "Descreve a necessidade pública e previsão no PCA (Inciso I e II)?"),
+                        ("2. Requisitos e Quantidades", "Define requisitos e justifica quantidades com memória (III e IV)?"),
+                        ("3. Levantamento de Mercado", "Analisou alternativas de mercado e justificou a solução (V e VII)?"),
+                        ("4. Estimativa de Valor", "Tem estimativa de valor com preços unitários (VI)?"),
+                        ("5. Parcelamento", "Justificou o parcelamento ou não (Inciso VIII)? Cite Súmula 247 TCU."),
+                        ("6. Viabilidade", "Posicionamento conclusivo sobre viabilidade (XIII)?")
                     ]
-                    st.session_state['result_etp'] = process_audit(vectorstore, file_etp, "ETP", questions)
+                    res = process_audit(vs, uploaded, "ETP", qs)
                 
-                if st.session_state['result_etp']:
-                    display_results(st.session_state['result_etp'], "ETP")
+                elif modo == "TR (Serviços)":
+                    qs = [
+                        ("1. Definição do Objeto", "Natureza, quantitativos e prazo (Art. 6, XXIII, a)?"),
+                        ("2. Fundamentação", "Referência ao ETP correspondente (b)?"),
+                        ("3. Gestão e Fiscalização", "Modelo de gestão e fiscalização do contrato (f)?"),
+                        ("4. Pagamento e Medição", "Critérios claros de medição e pagamento (g)?"),
+                        ("5. Seleção e Orçamento", "Critérios de seleção e adequação orçamentária (h, j)?")
+                    ]
+                    res = process_audit(vs, uploaded, "TR", qs)
 
-            # --- ABA 3: TR ou PROJETO BÁSICO (SELETOR) ---
-            with tab3:
-                # AQUI ESTÁ A SOLUÇÃO DA CONFUSÃO
-                st.info("Selecione o tipo de objeto para a auditoria correta:")
-                tipo_doc = st.radio("O que você vai auditar?", 
-                                    ["Termo de Referência (Bens e Serviços Comuns)", 
-                                     "Projeto Básico (Obras e Engenharia)"])
+                else: # OBRAS
+                    qs = [
+                        ("1. Engenharia (Sondagens)", "Há levantamentos topográficos e sondagens (Art. 6, XXV, a)?"),
+                        ("2. Soluções Técnicas", "As soluções técnicas estão detalhadas (b)?"),
+                        ("3. Cronograma e Métodos", "Há cronograma físico-financeiro e métodos construtivos?"),
+                        ("4. Orçamento (BDI)", "Orçamento detalhado com BDI discriminado (Dec. 7.983)?")
+                    ]
+                    res = process_audit(vs, uploaded, "PB_OBRAS", qs)
                 
-                file_tr = st.file_uploader("Suba o Arquivo (TR ou PB)", type="pdf", key="u3")
+                # EXIBIÇÃO
+                st.markdown("---")
+                st.header(f"📋 Relatório de Auditoria: {modo}")
                 
-                if file_tr and st.button("AUDITAR TR/PB", key="b3"):
-                    
-                    if tipo_doc == "Termo de Referência (Bens e Serviços Comuns)":
-                        # LISTA LEVE (Serviços)
-                        questions = [
-                            ("1. Definição do Objeto", "Definição do objeto, natureza, quantitativos e prazo?"),
-                            ("2. Fundamentação", "Fundamentação da contratação com referência ao ETP?"),
-                            ("3. Solução", "Descrição da solução como um todo?"),
-                            ("4. Execução", "Definição do modelo de execução do objeto?"),
-                            ("5. Gestão", "Modelo de gestão do contrato?"),
-                            ("6. Pagamento", "Critérios de medição e pagamento?"),
-                            ("7. Seleção", "Forma e critérios de seleção do fornecedor?"),
-                            ("8. Estimativa", "Estimativas de valor e memórias de cálculo?"),
-                            ("9. Orçamento", "Declaração de adequação orçamentária?")
-                        ]
-                        # Usa o Cérebro de Serviço
-                        st.session_state['result_tr'] = process_audit(vectorstore, file_tr, "TR_SERVICO", questions)
-                    
+                for tit, txt in res:
+                    if "ALERTA VERMELHO" in txt or "🚨" in txt:
+                        st.markdown(f"<div class='alert-box'><strong>{tit}</strong><br>{txt}</div>", unsafe_allow_html=True)
                     else:
-                        # LISTA PESADA (Obras - Art. 6 XXV)
-                        questions = [
-                            ("1. Levantamentos Técnicos", "Contém levantamentos topográficos, sondagens e estudos geotécnicos?"),
-                            ("2. Soluções Técnicas", "Soluções técnicas globais e localizadas detalhadas?"),
-                            ("3. Especificações", "Identificação de serviços, materiais e equipamentos com especificações?"),
-                            ("4. Cronograma/Métodos", "Definição de métodos construtivos e cronograma?"),
-                            ("5. Orçamento Detalhado (Dec. 7.983)", "Orçamento detalhado do custo global com BDI e Encargos Sociais discriminados?"),
-                            ("6. Licenciamento Ambiental", "O projeto trata do licenciamento e impacto ambiental do empreendimento?"),
-                            ("7. ART/RRT", "Há anotação de responsabilidade técnica (ART) dos projetistas?")
-                        ]
-                        # Usa o Cérebro de Obras
-                        st.session_state['result_tr'] = process_audit(vectorstore, file_tr, "PB_OBRAS", questions)
-                
-                if st.session_state['result_tr']:
-                    display_results(st.session_state['result_tr'], "TR/PB")
+                        with st.expander(f"✅ {tit}", expanded=True):
+                            st.write(txt)
 
 if __name__ == "__main__":
     main()
