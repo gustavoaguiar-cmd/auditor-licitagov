@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+import time
 from PyPDF2 import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
@@ -10,7 +11,7 @@ from langchain.prompts import PromptTemplate
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="AUDITOR LICI TECHGOV", page_icon="⚖️", layout="wide")
 
-# --- CSS PARA RELATÓRIOS PROFISSIONAIS ---
+# --- CSS VISUAL ---
 st.markdown("""
 <style>
 .alert-box {
@@ -40,10 +41,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- INICIALIZAR VARIÁVEIS DE SESSÃO ---
+# --- SESSÃO ---
 if 'logged' not in st.session_state: st.session_state['logged'] = False
 
-# --- 1. FUNÇÃO DE LOGIN ---
+# --- 1. LOGIN ---
 def check_login(key):
     users = {
         "AMIGO_TESTE": 3,
@@ -52,14 +53,14 @@ def check_login(key):
     }
     return users.get(key, -1)
 
-# --- 2. CARREGAMENTO DA BASE LEGAL (LEI + JURISPRUDÊNCIA) ---
+# --- 2. CARREGAMENTO DA BASE ---
 @st.cache_resource(show_spinner=False)
 def load_knowledge_base():
     text = ""
     data_folder = "data"
     
     if not os.path.exists(data_folder):
-        return None, ["ERRO CRÍTICO: Pasta 'data' não encontrada no sistema."]
+        return None, ["ERRO CRÍTICO: Pasta 'data' não encontrada."]
 
     files_log = []
     for root, dirs, files in os.walk(data_folder):
@@ -71,7 +72,6 @@ def load_knowledge_base():
                     for page in pdf_reader.pages:
                         page_text = page.extract_text()
                         if page_text:
-                            # Limpeza de caracteres nulos
                             clean_page = page_text.replace('\x00', '')
                             text += f"\n[FONTE JURÍDICA: {filename}] {clean_page}"
                     files_log.append(f"✅ Base Carregada: {filename}")
@@ -81,7 +81,6 @@ def load_knowledge_base():
     
     if text == "": return None, files_log
 
-    # Splitter inteligente otimizado para leis
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=2000,
         chunk_overlap=200,
@@ -93,6 +92,7 @@ def load_knowledge_base():
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key: return None, ["ERRO: Chave API ausente."]
     
+    # Chunk size menor para envio de embeddings (evita timeout no upload)
     embeddings = OpenAIEmbeddings(openai_api_key=api_key, chunk_size=100)
     
     try:
@@ -101,51 +101,53 @@ def load_knowledge_base():
     except Exception as e:
         return None, [f"ERRO CRÍTICO OPENAI: {str(e)}"]
 
-# --- 3. CÉREBRO JURÍDICO (PROMPTS DE VARREDURA TOTAL) ---
+# --- 3. CÉREBRO JURÍDICO (PROMPT) ---
 def get_audit_chain():
     
-    # PROMPT GENÉRICO E PODEROSO - O "CÃO DE GUARDA"
     prompt_template = """
     Você é um Auditor Sênior Especialista em Licitações Públicas (Lei 14.133/21).
-    Sua tarefa é auditar o documento fornecido minuciosamente, do início ao fim.
     
-    INSTRUÇÃO DE VARREDURA:
-    1. LEIA O TEXTO INTEIRO. Não pare na metade. Informações vitais (garantia, pagamento) podem estar no final.
-    2. Cruze o texto do documento com o CONTEXTO JURÍDICO fornecido (Leis, Súmulas TCU, Acórdãos).
-    3. Identifique TODAS as irregularidades, restrições indevidas, omissões obrigatórias ou cláusulas vagas.
-    4. Se o texto estiver correto e completo, confirme citando o item/página onde encontrou a informação.
+    INSTRUÇÃO DE VARREDURA (Buscando Erros):
+    1. LEIA O TEXTO INTEIRO fornecido.
+    2. Identifique TODAS as irregularidades, restrições indevidas, omissões obrigatórias ou cláusulas vagas.
+    3. Cruze com a Jurisprudência fornecida.
     
-    TEMA DA ANÁLISE (Onde focar sua lupa agora): {question}
+    TEMA DA ANÁLISE: {question}
     
-    CONTEXTO JURÍDICO (Sua Base de Conhecimento):
+    CONTEXTO JURÍDICO:
     {context}
     
     PARECER DO AUDITOR:
-    - Seja rigoroso. Aponte o Artigo da Lei ou Súmula violada.
-    - Se houver exigência restritiva (ex: limitação geográfica, taxas ilegais, excesso de atestados), denuncie.
-    - Se faltar algo essencial (ex: BDI em obras, Reajuste, Fiscalização), aponte como OMISSÃO GRAVE.
-    - Se estiver tudo certo, diga "CONFORME" e explique porquê.
+    - Se achar erro/restrição: Comece com "🚨 ALERTA".
+    - Se faltar item obrigatório: Comece com "⚠️ OMISSÃO".
+    - Se estiver tudo certo: Comece com "✅ CONFORME" e cite onde achou.
+    - Seja extremamente técnico e cite os artigos.
     """
 
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-    # GPT-4o COM MAXIMA INTELIGENCIA (Sem limites de token)
-    model = ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=api_key)
+    
+    # --- MUDANÇA ESTRATÉGICA: GPT-4o-MINI ---
+    # Motivo: Aguenta 128k tokens mas tem limite de TPM muito maior que o 4o standard.
+    # Isso resolve o erro 429 para documentos gigantes.
+    model = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=api_key)
+    
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
     return load_qa_chain(model, chain_type="stuff", prompt=prompt)
 
-# --- 4. MOTOR DE AUDITORIA (LEITURA INTEGRAL) ---
+# --- 4. MOTOR DE AUDITORIA (PROCESSAMENTO) ---
 def process_audit_full(vectorstore, uploaded_file, audit_protocol):
     reader = PdfReader(uploaded_file)
     doc_text = ""
     
-    # 1. LEITURA COMPLETA DO ARQUIVO (Página a Página)
+    # Extração
     for i, page in enumerate(reader.pages):
         content = page.extract_text()
         if content:
             doc_text += f"\n--- PÁGINA {i+1} ---\n{content.replace(chr(0), '')}"
     
+    # Verifica tamanho
     if len(doc_text) < 50:
-        return [("Erro", "Arquivo vazio ou ilegível.")]
+        return [("Erro", "Arquivo vazio.")]
 
     chain = get_audit_chain()
     results = []
@@ -153,37 +155,35 @@ def process_audit_full(vectorstore, uploaded_file, audit_protocol):
     status = st.empty()
     progress = st.progress(0)
     
-    full_report_text = ""
-    
-    # 2. LOOP PELO PROTOCOLO (VARREDURA POR DIMENSÕES)
     for i, (area, comando_especifico) in enumerate(audit_protocol):
         status.markdown(f"**🕵️ Auditando Dimensão:** {area}...")
         
-        # Busca Jurisprudência Relevante para esta dimensão na base
+        # Busca Jurisprudência
         docs_lei = vectorstore.similarity_search(comando_especifico, k=5)
         
-        # Monta o Prompt com o DOCUMENTO INTEIRO
         final_query = f"""
-        DOCUMENTO DO USUÁRIO (TEXTO COMPLETO PARA ANÁLISE):
+        DOCUMENTO DO USUÁRIO (TEXTO COMPLETO):
         {doc_text}
-        
-        --------------------------------------------------
         
         ORDEM DE AUDITORIA: 
         Dimensão: '{area}'.
-        O que buscar: {comando_especifico}
-        
-        Verifique se há conformidade total ou se há vícios.
+        Foco: {comando_especifico}
         """
         
         try:
             response = chain.run(input_documents=docs_lei, question=final_query)
         except Exception as e:
-            response = f"Erro técnico: {str(e)}"
+            if "429" in str(e):
+                response = "⚠️ O documento é muito extenso e atingiu o limite momentâneo da IA. Tente aguardar 1 minuto e tentar novamente."
+            else:
+                response = f"Erro técnico: {str(e)}"
         
         results.append((area, response))
-        full_report_text += f"\n\nDIMENSÃO {area}:\n{response}"
         progress.progress((i + 1) / len(audit_protocol))
+        
+        # --- FREIO ABS ---
+        # Pausa de 2 segundos para esfriar a API entre perguntas
+        time.sleep(2)
     
     status.empty()
     return results
@@ -208,10 +208,10 @@ def main():
                 st.rerun()
 
     if st.session_state['logged']:
-        st.title("🏛️ AUDITOR LICI TECHGOV - BY GUSTAVO (v6.0)")
+        st.title("🏛️ AUDITOR LICI TECHGOV - BY GUSTAVO (v6.1)")
         
         if 'vectorstore' not in st.session_state:
-            with st.spinner("Carregando Cérebro Jurídico (Leis + TCU)..."):
+            with st.spinner("Carregando Cérebro Jurídico..."):
                 vs, logs = load_knowledge_base()
                 if vs: st.session_state['vectorstore'] = vs
                 else: st.error("Erro na Base.")
@@ -228,35 +228,30 @@ def main():
             with col2:
                 if uploaded and start:
                     
-                    # --- O PROTOCOLO DE VARREDURA ---
-                    # Essas são as "lentes" que o robô vai usar para ler o texto inteiro.
-                    # Elas cobrem TODAS as áreas da lei, garantindo que nada passe batido.
-                    
                     if doc_type == "EDITAL":
                         protocol = [
-                            ("1. Legalidade, Objeto e Fundamentação", "Verifique a legalidade do objeto, se há definição clara, se cita a Lei 14.133 corretamente e se o critério de julgamento está adequado."),
-                            ("2. Habilitação e Restrições (Pente-Fino)", "Analise RIGOROSAMENTE as cláusulas de habilitação. Busque por exigências que restrinjam a competição (sede local, vistoria obrigatória, índices abusivos, capital excessivo)."),
-                            ("3. Orçamento, Reajuste e Financeiro", "Verifique as regras de orçamento, cláusula de reajuste (obrigatória), critérios de aceitabilidade de preços e garantia."),
-                            ("4. Ritos, Prazos e Recursos", "Verifique se os prazos de publicidade, impugnação, recurso e validade das propostas respeitam a Lei 14.133.")
+                            ("1. Legalidade, Objeto e Fundamentação", "Verifique legalidade do objeto, Lei 14.133 e critério de julgamento."),
+                            ("2. Habilitação e Restrições (Pente-Fino)", "Analise RIGOROSAMENTE as cláusulas de habilitação. Busque restrições (sede local, vistoria obrigatória, índices abusivos, capital excessivo)."),
+                            ("3. Orçamento, Reajuste e Financeiro", "Verifique orçamento, reajuste (obrigatório), aceitabilidade de preços e garantia."),
+                            ("4. Ritos, Prazos e Recursos", "Verifique prazos de publicidade, impugnação, recurso e validade das propostas.")
                         ]
                     
                     elif doc_type == "ETP":
                         protocol = [
-                            ("1. Necessidade e Planejamento (Inc. I e II)", "Verifique se a necessidade pública está justificada e se há previsão no PCA."),
-                            ("2. Estudo de Mercado e Solução (Inc. V, VI, VII)", "Analise se houve levantamento de alternativas, estimativa de quantidades e definição da solução."),
-                            ("3. Parcelamento do Objeto (Inc. VIII)", "Verifique se há justificativa expressa para o parcelamento ou não (Súmula 247 TCU). Item CRÍTICO."),
-                            ("4. Viabilidade e Conclusão (Inc. XIII)", "Verifique a estimativa de valor e o posicionamento conclusivo sobre a viabilidade.")
+                            ("1. Necessidade e Planejamento", "Necessidade pública (Inc I) e PCA (Inc II)."),
+                            ("2. Estudo de Mercado e Solução", "Levantamento de alternativas e estimativa de quantidades com memória."),
+                            ("3. Parcelamento do Objeto", "Justificativa expressa para o parcelamento ou não (Súmula 247 TCU)."),
+                            ("4. Viabilidade e Valor", "Estimativa de valor e conclusão de viabilidade.")
                         ]
                     
                     else: # TR / PB
                         protocol = [
-                            ("1. Definição Técnica e Objeto", "Analise a descrição do objeto, quantitativos, se bate com o ETP."),
-                            ("2. Gestão e Fiscalização (Fiscal e Gestor)", "Verifique se há modelo de gestão, indicação de fiscal/gestor e procedimentos de fiscalização."),
-                            ("3. Pagamento, Medição e Recebimento", "Analise CRITERIOSAMENTE: Prazo de pagamento, critérios de medição e recebimento (provisório/definitivo)."),
-                            ("4. Obrigações, Garantia e Sanções", "Verifique as obrigações da contratada, prazo de garantia (CDC/Lei) e sanções administrativas.")
+                            ("1. Definição Técnica", "Descrição do objeto, quantitativos e referência ao ETP."),
+                            ("2. Gestão e Fiscalização", "Modelo de gestão, indicação de fiscal/gestor e procedimentos."),
+                            ("3. Pagamento e Recebimento", "Prazo de pagamento, critérios de medição e recebimento (provisório/definitivo)."),
+                            ("4. Obrigações e Sanções", "Obrigações, garantia e sanções administrativas.")
                         ]
 
-                    # RODA A AUDITORIA TOTAL
                     results = process_audit_full(st.session_state['vectorstore'], uploaded, protocol)
                     
                     st.subheader("📋 Relatório de Auditoria Completa")
