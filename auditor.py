@@ -38,6 +38,15 @@ st.markdown("""
     border-radius: 5px;
     color: #333;
 }
+.warning-msg {
+    color: #856404;
+    background-color: #fff3cd;
+    border-color: #ffeeba;
+    padding: 10px;
+    border-radius: 5px;
+    font-size: 0.9em;
+    margin-top: 5px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -92,7 +101,6 @@ def load_knowledge_base():
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key: return None, ["ERRO: Chave API ausente."]
     
-    # Chunk size menor para envio de embeddings (evita timeout no upload)
     embeddings = OpenAIEmbeddings(openai_api_key=api_key, chunk_size=100)
     
     try:
@@ -101,16 +109,18 @@ def load_knowledge_base():
     except Exception as e:
         return None, [f"ERRO CRÍTICO OPENAI: {str(e)}"]
 
-# --- 3. CÉREBRO JURÍDICO (PROMPT) ---
+# --- 3. CÉREBRO JURÍDICO (PROMPT INTELIGENTE) ---
 def get_audit_chain():
     
     prompt_template = """
-    Você é um Auditor Sênior Especialista em Licitações Públicas (Lei 14.133/21).
+    Você é um Auditor Sênior Especialista em Licitações (Lei 14.133/21).
     
-    INSTRUÇÃO DE VARREDURA (Buscando Erros):
-    1. LEIA O TEXTO INTEIRO fornecido.
-    2. Identifique TODAS as irregularidades, restrições indevidas, omissões obrigatórias ou cláusulas vagas.
-    3. Cruze com a Jurisprudência fornecida.
+    Sua missão é evitar "Falsos Positivos".
+    
+    INSTRUÇÃO DE VARREDURA (Busca Holística):
+    1. LEIA O TEXTO INTEIRO.
+    2. Se você procura um requisito (ex: CNDT, Declaração PcD) e não encontrar na seção "Habilitação", BUSQUE NO RESTO DO DOCUMENTO (ex: Minuta de Contrato, Declarações Anexas).
+    3. Se o item estiver presente em QUALQUER lugar do documento, considere ATENDIDO, mas faça uma ressalva se estiver no lugar errado.
     
     TEMA DA ANÁLISE: {question}
     
@@ -118,34 +128,49 @@ def get_audit_chain():
     {context}
     
     PARECER DO AUDITOR:
-    - Se achar erro/restrição: Comece com "🚨 ALERTA".
-    - Se faltar item obrigatório: Comece com "⚠️ OMISSÃO".
-    - Se estiver tudo certo: Comece com "✅ CONFORME" e cite onde achou.
-    - Seja extremamente técnico e cite os artigos.
+    - Se achar irregularidade real: Comece com "🚨 ALERTA".
+    - Se achar o item, mas em local estranho: Comece com "⚠️ RESSALVA" e explique (ex: "A CNDT é exigida no item 25 para pagamento, mas não consta na habilitação").
+    - Se estiver tudo certo: Comece com "✅ CONFORME" e cite o item/página.
+    - Omissão: Só use se tiver CERTEZA ABSOLUTA que não existe menção no arquivo inteiro.
     """
 
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     
-    # --- MUDANÇA ESTRATÉGICA: GPT-4o-MINI ---
-    # Motivo: Aguenta 128k tokens mas tem limite de TPM muito maior que o 4o standard.
-    # Isso resolve o erro 429 para documentos gigantes.
-    model = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=api_key)
+    # --- VOLTAMOS PARA O GPT-4o (O MAIS INTELIGENTE) ---
+    # O handler de erro (backoff) vai gerenciar os limites.
+    model = ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=api_key)
     
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
     return load_qa_chain(model, chain_type="stuff", prompt=prompt)
 
-# --- 4. MOTOR DE AUDITORIA (PROCESSAMENTO) ---
+# --- 4. FUNÇÃO ROBUSTA COM RETRY (SISTEMA ANTI-CRASH) ---
+def run_with_retry(chain, docs_lei, final_query, max_retries=3):
+    """Tenta rodar a IA. Se der erro de limite (429), espera e tenta de novo."""
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            return chain.run(input_documents=docs_lei, question=final_query)
+        except Exception as e:
+            error_msg = str(e)
+            if "429" in error_msg or "Rate limit" in error_msg:
+                wait_time = 40 # Espera 40 segundos se bater no teto
+                st.toast(f"⏳ Alto volume de dados. A IA está analisando profundamente... ({attempt+1}/{max_retries})")
+                time.sleep(wait_time)
+                attempt += 1
+            else:
+                return f"Erro técnico irrecuperável: {error_msg}"
+    return "⚠️ Erro: O sistema da OpenAI está sobrecarregado no momento. Tente novamente em 2 minutos."
+
+# --- 5. MOTOR DE AUDITORIA ---
 def process_audit_full(vectorstore, uploaded_file, audit_protocol):
     reader = PdfReader(uploaded_file)
     doc_text = ""
     
-    # Extração
     for i, page in enumerate(reader.pages):
         content = page.extract_text()
         if content:
             doc_text += f"\n--- PÁGINA {i+1} ---\n{content.replace(chr(0), '')}"
     
-    # Verifica tamanho
     if len(doc_text) < 50:
         return [("Erro", "Arquivo vazio.")]
 
@@ -155,10 +180,12 @@ def process_audit_full(vectorstore, uploaded_file, audit_protocol):
     status = st.empty()
     progress = st.progress(0)
     
+    # Aviso de Processamento Pesado
+    st.info("ℹ️ Modo Análise Profunda ativado (GPT-4o). Isso pode levar alguns minutos para garantir precisão máxima.")
+    
     for i, (area, comando_especifico) in enumerate(audit_protocol):
         status.markdown(f"**🕵️ Auditando Dimensão:** {area}...")
         
-        # Busca Jurisprudência
         docs_lei = vectorstore.similarity_search(comando_especifico, k=5)
         
         final_query = f"""
@@ -170,25 +197,16 @@ def process_audit_full(vectorstore, uploaded_file, audit_protocol):
         Foco: {comando_especifico}
         """
         
-        try:
-            response = chain.run(input_documents=docs_lei, question=final_query)
-        except Exception as e:
-            if "429" in str(e):
-                response = "⚠️ O documento é muito extenso e atingiu o limite momentâneo da IA. Tente aguardar 1 minuto e tentar novamente."
-            else:
-                response = f"Erro técnico: {str(e)}"
+        # Chama a função segura com retry
+        response = run_with_retry(chain, docs_lei, final_query)
         
         results.append((area, response))
         progress.progress((i + 1) / len(audit_protocol))
         
-        # --- FREIO ABS ---
-        # Pausa de 2 segundos para esfriar a API entre perguntas
-        time.sleep(2)
-    
     status.empty()
     return results
 
-# --- 5. INTERFACE ---
+# --- 6. INTERFACE ---
 def main():
     with st.sidebar:
         st.header("🔐 Acesso")
@@ -208,7 +226,7 @@ def main():
                 st.rerun()
 
     if st.session_state['logged']:
-        st.title("🏛️ AUDITOR LICI TECHGOV - BY GUSTAVO (v6.1)")
+        st.title("🏛️ AUDITOR LICI TECHGOV - BY GUSTAVO (v7.0)")
         
         if 'vectorstore' not in st.session_state:
             with st.spinner("Carregando Cérebro Jurídico..."):
@@ -230,26 +248,26 @@ def main():
                     
                     if doc_type == "EDITAL":
                         protocol = [
-                            ("1. Legalidade, Objeto e Fundamentação", "Verifique legalidade do objeto, Lei 14.133 e critério de julgamento."),
-                            ("2. Habilitação e Restrições (Pente-Fino)", "Analise RIGOROSAMENTE as cláusulas de habilitação. Busque restrições (sede local, vistoria obrigatória, índices abusivos, capital excessivo)."),
-                            ("3. Orçamento, Reajuste e Financeiro", "Verifique orçamento, reajuste (obrigatório), aceitabilidade de preços e garantia."),
-                            ("4. Ritos, Prazos e Recursos", "Verifique prazos de publicidade, impugnação, recurso e validade das propostas.")
+                            ("1. Legalidade, Objeto e Fundamentação", "Verifique legalidade do objeto e Lei 14.133."),
+                            ("2. Habilitação e Restrições (Pente-Fino)", "Analise a Habilitação. IMPORTANTE: Antes de apontar omissão de CNDT ou Declarações, busque no documento inteiro (incluindo anexos e condições de execução)."),
+                            ("3. Orçamento, Reajuste e Financeiro", "Verifique orçamento, reajuste e garantia."),
+                            ("4. Ritos, Prazos e Recursos", "Verifique prazos e validade das propostas.")
                         ]
                     
                     elif doc_type == "ETP":
                         protocol = [
                             ("1. Necessidade e Planejamento", "Necessidade pública (Inc I) e PCA (Inc II)."),
-                            ("2. Estudo de Mercado e Solução", "Levantamento de alternativas e estimativa de quantidades com memória."),
-                            ("3. Parcelamento do Objeto", "Justificativa expressa para o parcelamento ou não (Súmula 247 TCU)."),
-                            ("4. Viabilidade e Valor", "Estimativa de valor e conclusão de viabilidade.")
+                            ("2. Estudo de Mercado e Solução", "Levantamento de alternativas e estimativa de quantidades."),
+                            ("3. Parcelamento do Objeto", "Justificativa expressa para o parcelamento ou não."),
+                            ("4. Viabilidade e Valor", "Estimativa de valor e conclusão.")
                         ]
                     
                     else: # TR / PB
                         protocol = [
-                            ("1. Definição Técnica", "Descrição do objeto, quantitativos e referência ao ETP."),
-                            ("2. Gestão e Fiscalização", "Modelo de gestão, indicação de fiscal/gestor e procedimentos."),
-                            ("3. Pagamento e Recebimento", "Prazo de pagamento, critérios de medição e recebimento (provisório/definitivo)."),
-                            ("4. Obrigações e Sanções", "Obrigações, garantia e sanções administrativas.")
+                            ("1. Definição Técnica", "Descrição do objeto e quantitativos."),
+                            ("2. Gestão e Fiscalização", "Modelo de gestão e fiscalização."),
+                            ("3. Pagamento e Recebimento", "Prazo de pagamento e critérios de medição."),
+                            ("4. Obrigações e Sanções", "Obrigações e sanções.")
                         ]
 
                     results = process_audit_full(st.session_state['vectorstore'], uploaded, protocol)
