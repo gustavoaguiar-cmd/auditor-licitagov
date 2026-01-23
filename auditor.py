@@ -11,15 +11,34 @@ from langchain.prompts import PromptTemplate
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="LICI TECHGOV", page_icon="🏛️", layout="wide")
 
-# --- CSS VISUAL ---
+# --- CSS VISUAL PROFISSIONAL ---
 st.markdown("""
 <style>
+    /* Estilos Gerais */
     .alert-box { background-color: #ffe6e6; border-left: 6px solid #ff4b4b; padding: 15px; margin-bottom: 20px; border-radius: 5px; color: #333; }
     .success-box { background-color: #e6fffa; border-left: 6px solid #00cc99; padding: 15px; margin-bottom: 20px; border-radius: 5px; color: #333; }
     .neutral-box { background-color: #f0f2f6; border-left: 6px solid #555; padding: 15px; margin-bottom: 20px; border-radius: 5px; color: #333; }
-    .landing-header { font-size: 3em; font-weight: bold; color: #1E3A8A; text-align: center; margin-bottom: 0.5em; }
-    .landing-sub { font-size: 1.5em; color: #555; text-align: center; margin-bottom: 2em; }
-    .feature-card { background-color: #fff; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); text-align: center; height: 100%; }
+    
+    /* Landing Page - Design Premium */
+    .landing-header { font-size: 3em; font-weight: bold; color: #1E3A8A; text-align: center; margin-bottom: 0.2em; text-transform: uppercase; letter-spacing: 2px; }
+    .landing-sub { font-size: 1.4em; color: #555; text-align: center; margin-bottom: 3em; font-weight: 300; }
+    
+    .feature-card { 
+        background-color: #ffffff; 
+        padding: 30px; 
+        border-radius: 15px; 
+        box-shadow: 0 10px 20px rgba(0,0,0,0.08); 
+        text-align: center; 
+        height: 100%; 
+        border-top: 5px solid #1E3A8A;
+        transition: transform 0.3s ease;
+    }
+    .feature-card:hover { transform: translateY(-5px); }
+    .feature-card h4 { color: #1E3A8A; font-weight: bold; font-size: 1.2em; margin-bottom: 15px; }
+    .feature-card p { color: #666; font-size: 1em; line-height: 1.6; }
+    
+    /* Sidebar */
+    [data-testid="stSidebar"] { background-color: #f8f9fa; border-right: 1px solid #dee2e6; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -87,15 +106,18 @@ def load_knowledge_base():
 def create_chain():
     prompt_template = """
     Você é um Auditor Sênior Especialista em Licitações (Lei 14.133/21).
-    INSTRUÇÃO: LEIA O TEXTO INTEIRO. Se não achar requisito na Habilitação, busque no resto do documento.
+    INSTRUÇÃO DE VARREDURA:
+    1. LEIA O TEXTO INTEIRO.
+    2. Se não achar requisito na Habilitação, busque no resto do documento (Minuta, Anexos, TR).
+    3. Cruze com a Jurisprudência fornecida.
     
     TEMA: {question}
     CONTEXTO JURÍDICO: {context}
     
     PARECER:
-    - Irregularidade: "🚨 ALERTA".
-    - Ressalva (Item deslocado): "⚠️ RESSALVA".
-    - Conforme: "✅ CONFORME".
+    - Irregularidade Grave: "🚨 ALERTA".
+    - Ressalva (Item deslocado): "⚠️ RESSALVA" (Explique onde encontrou).
+    - Conforme: "✅ CONFORME" (Cite o item).
     """
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     model = ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=api_key)
@@ -108,9 +130,9 @@ def robust_audit_run(vectorstore, final_query, docs_lei):
         try:
             return chain.run(input_documents=docs_lei, question=final_query)
         except Exception as e:
-            if "insufficient_quota" in str(e): return "💸 FALHA: Saldo da OpenAI esgotado."
+            if "insufficient_quota" in str(e): return "💸 FALHA CRÍTICA: Saldo da OpenAI esgotado."
             if "429" in str(e):
-                time.sleep(20)
+                time.sleep(10) # Espera 10s e tenta de novo
                 continue
             return f"Erro: {str(e)}"
     return "⚠️ Sistema ocupado. Tente novamente."
@@ -145,61 +167,88 @@ def process_audit_full(vectorstore, uploaded_file, audit_protocol):
 # --- 6. INTERFACE ---
 def main():
     with st.sidebar:
-        st.markdown("### 🔐 Acesso")
+        st.markdown("### 🔐 Acesso Restrito")
         if not st.session_state['logged']:
-            key = st.text_input("Chave", type="password")
-            if st.button("Entrar"):
+            key = st.text_input("Chave de Acesso", type="password")
+            if st.button("Entrar no Sistema"):
                 if check_login(key) > -1:
                     st.session_state['logged'] = True
                     st.session_state['user_key'] = key
                     st.rerun()
-                else: st.error("Negado.")
+                else: st.error("Credencial Inválida.")
         else:
             st.success(f"Logado: {st.session_state.get('user_key')}")
             if st.button("Sair"):
                 st.session_state['logged'] = False
                 st.rerun()
+            st.markdown("---")
+            st.caption("Licença Corporativa: AguiarGov")
 
     if not st.session_state['logged']:
+        # LANDING PAGE COM REDAÇÃO DE VENDA (V9.0)
         st.markdown("<div class='landing-header'>🏛️ LICI TECHGOV</div>", unsafe_allow_html=True)
-        st.markdown("<div class='landing-sub'>Inteligência Artificial para Gestão Pública</div>", unsafe_allow_html=True)
+        st.markdown("<div class='landing-sub'>Inteligência Artificial de Alta Precisão para Gestão Pública</div>", unsafe_allow_html=True)
+        
         c1, c2, c3 = st.columns(3)
-        with c1: st.markdown("<div class='feature-card'><h4>🔍 Auditoria Jurídica</h4></div>", unsafe_allow_html=True)
-        with c2: st.markdown("<div class='feature-card'><h4>⚡ Alta Precisão</h4></div>", unsafe_allow_html=True)
-        with c3: st.markdown("<div class='feature-card'><h4>🛡️ Blindagem</h4></div>", unsafe_allow_html=True)
+        with c1:
+            st.markdown("""
+            <div class='feature-card'>
+            <h4>🔍 Auditoria Jurídica 360º</h4>
+            <p>Varredura completa baseada na <strong>Lei 14.133/21</strong> e cruzamento em tempo real com a <strong>Jurisprudência do TCU/TCE</strong>.</p>
+            </div>
+            """, unsafe_allow_html=True)
+        with c2:
+            st.markdown("""
+            <div class='feature-card'>
+            <h4>⚡ Inteligência Artificial Premium</h4>
+            <p>Motor GPT-4o calibrado para identificar riscos ocultos, omissões de garantias e cláusulas restritivas.</p>
+            </div>
+            """, unsafe_allow_html=True)
+        with c3:
+            st.markdown("""
+            <div class='feature-card'>
+            <h4>🛡️ Segurança Jurídica e Blindagem</h4>
+            <p>Garanta editais robustos e reduza impugnações com análises preditivas antes da publicação.</p>
+            </div>
+            """, unsafe_allow_html=True)
 
     else:
-        st.title("🏛️ AUDITOR LICI TECHGOV (v8.3)")
+        st.title("🏛️ AUDITOR LICI TECHGOV (v9.0)")
         
         if 'vectorstore' not in st.session_state:
-            with st.spinner("Carregando Base..."):
+            with st.spinner("Inicializando Base de Conhecimento Jurídico..."):
                 vs, logs = load_knowledge_base()
                 if vs: st.session_state['vectorstore'] = vs
                 else: 
-                    st.error("Erro na Base de Conhecimento.")
-                    with st.expander("Ver Logs"):
+                    st.error("Erro na Base de Dados.")
+                    with st.expander("Ver Detalhes"):
                         for log in logs: st.write(log)
         
         if st.session_state.get('vectorstore'):
             col1, col2 = st.columns([1, 2])
             with col1:
-                st.info("📂 Configuração")
-                doc_type = st.radio("Tipo:", ["EDITAL", "ETP", "TR"])
-                uploaded = st.file_uploader("PDF", type="pdf")
-                start = st.button("🔍 INICIAR", type="primary")
+                st.info("📂 Parâmetros da Análise")
+                doc_type = st.radio("Tipo de Documento:", ["EDITAL", "ETP", "TR / PROJETO BÁSICO"])
+                uploaded = st.file_uploader("Upload do Arquivo (PDF)", type="pdf")
+                start = st.button("🔍 EXECUTAR VARREDURA", type="primary")
 
             with col2:
                 if uploaded and start:
                     if doc_type == "EDITAL":
-                        prot = [("1. Legalidade", "Lei 14.133."), ("2. Habilitação", "Varredura Total (CNDT/PcD)."), ("3. Financeiro", "Orçamento/Garantia."), ("4. Ritos", "Prazos.")]
+                        prot = [
+                            ("1. Legalidade e Fundamentação", "Verifique legalidade do objeto, Lei 14.133/21 e Jurisprudência."), 
+                            ("2. Habilitação (Varredura Total)", "Analise Habilitação. Busque CNDT, PcD e Balanço no DOCUMENTO INTEIRO antes de apontar omissão."), 
+                            ("3. Financeiro e Garantias", "Verifique orçamento, reajuste e garantias."), 
+                            ("4. Ritos e Prazos", "Verifique prazos e validade das propostas.")
+                        ]
                     elif doc_type == "ETP":
-                        prot = [("1. Necessidade", "PCA."), ("2. Solução", "Mercado."), ("3. Parcelamento", "Súmula 247."), ("4. Viabilidade", "Valor.")]
+                        prot = [("1. Necessidade e PCA", "Necessidade pública e PCA."), ("2. Solução", "Alternativas e estimativa."), ("3. Parcelamento", "Justificativa (Súmula 247)."), ("4. Viabilidade", "Valor e Conclusão.")]
                     else:
-                        prot = [("1. Técnica", "Objeto."), ("2. Gestão", "Fiscalização."), ("3. Pagamento", "Medição."), ("4. Sanções", "Obrigações.")]
+                        prot = [("1. Técnica", "Objeto e quantitativos."), ("2. Gestão", "Fiscalização."), ("3. Pagamento", "Medição e pagamento."), ("4. Sanções", "Obrigações e sanções.")]
 
                     res = process_audit_full(st.session_state['vectorstore'], uploaded, prot)
                     
-                    st.subheader("📋 Relatório")
+                    st.subheader("📋 Relatório de Auditoria")
                     for a, t in res:
                         if "ALERTA" in t or "FALHA" in t: st.markdown(f"<div class='alert-box'><h3>{a}</h3>{t}</div>", unsafe_allow_html=True)
                         elif "CONFORME" in t: st.markdown(f"<div class='success-box'><h3>{a}</h3>{t}</div>", unsafe_allow_html=True)
