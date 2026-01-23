@@ -14,30 +14,12 @@ st.set_page_config(page_title="LICI TECHGOV", page_icon="🏛️", layout="wide"
 # --- CSS VISUAL PROFISSIONAL ---
 st.markdown("""
 <style>
-    /* Estilos Gerais */
     .alert-box { background-color: #ffe6e6; border-left: 6px solid #ff4b4b; padding: 15px; margin-bottom: 20px; border-radius: 5px; color: #333; }
     .success-box { background-color: #e6fffa; border-left: 6px solid #00cc99; padding: 15px; margin-bottom: 20px; border-radius: 5px; color: #333; }
     .neutral-box { background-color: #f0f2f6; border-left: 6px solid #555; padding: 15px; margin-bottom: 20px; border-radius: 5px; color: #333; }
-    
-    /* Landing Page - Design Premium */
     .landing-header { font-size: 3em; font-weight: bold; color: #1E3A8A; text-align: center; margin-bottom: 0.2em; text-transform: uppercase; letter-spacing: 2px; }
     .landing-sub { font-size: 1.4em; color: #555; text-align: center; margin-bottom: 3em; font-weight: 300; }
-    
-    .feature-card { 
-        background-color: #ffffff; 
-        padding: 30px; 
-        border-radius: 15px; 
-        box-shadow: 0 10px 20px rgba(0,0,0,0.08); 
-        text-align: center; 
-        height: 100%; 
-        border-top: 5px solid #1E3A8A;
-        transition: transform 0.3s ease;
-    }
-    .feature-card:hover { transform: translateY(-5px); }
-    .feature-card h4 { color: #1E3A8A; font-weight: bold; font-size: 1.2em; margin-bottom: 15px; }
-    .feature-card p { color: #666; font-size: 1em; line-height: 1.6; }
-    
-    /* Sidebar */
+    .feature-card { background-color: #ffffff; padding: 30px; border-radius: 15px; box-shadow: 0 10px 20px rgba(0,0,0,0.08); text-align: center; height: 100%; border-top: 5px solid #1E3A8A; }
     [data-testid="stSidebar"] { background-color: #f8f9fa; border-right: 1px solid #dee2e6; }
 </style>
 """, unsafe_allow_html=True)
@@ -50,22 +32,22 @@ def check_login(key):
     users = {"AMIGO_TESTE": 3, "PREFEITURA_X": 10, "GUSTAVO_ADMIN": 999}
     return users.get(key, -1)
 
-# --- 2. CARREGAMENTO DA BASE (COM PROTEÇÃO DE COTA) ---
+# --- 2. CARREGAMENTO DA BASE (COM BATCHING - SEM LIMITES) ---
 @st.cache_resource(show_spinner=False)
 def load_knowledge_base():
     text = ""
     data_folder = "data"
     
-    # Cria pasta se não existir
     if not os.path.exists(data_folder):
         try:
             os.makedirs(data_folder)
-            return None, ["⚠️ Pasta 'data' criada. Adicione os PDFs jurídicos nela."]
-        except:
-            return None, ["❌ Erro de permissão ao criar pasta."]
+            return None, ["⚠️ Pasta 'data' criada. Adicione PDFs."]
+        except: return None, ["❌ Erro ao criar pasta."]
 
     files_log = []
     pdf_count = 0
+    
+    # Leitura dos Arquivos
     for root, dirs, files in os.walk(data_folder):
         for filename in files:
             if filename.lower().endswith('.pdf'):
@@ -76,48 +58,62 @@ def load_knowledge_base():
                         page_text = page.extract_text()
                         if page_text:
                             clean_page = page_text.replace('\x00', '')
-                            text += f"\n[FONTE JURÍDICA: {filename}] {clean_page}"
-                    files_log.append(f"✅ Indexado: {filename}")
+                            text += f"\n[FONTE: {filename}] {clean_page}"
+                    files_log.append(f"✅ Lido: {filename}")
                 except Exception:
-                    files_log.append(f"❌ Falha: {filename}")
                     continue
     
-    if pdf_count == 0: return None, ["⚠️ Nenhum PDF na pasta 'data'."]
-    if text == "": return None, ["⚠️ PDFs vazios ou sem OCR."]
+    if pdf_count == 0: return None, ["⚠️ Pasta vazia."]
+    if not text: return None, ["⚠️ PDFs sem texto (OCR necessário)."]
 
     try:
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200, separators=["\nArt.", "\n\n", ". ", " ", ""])
-        chunks = [c for c in text_splitter.split_text(text) if c and len(c.strip()) > 20]
+        # Fatiamento do Texto
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
+        chunks = text_splitter.split_text(text)
         
         api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-        if not api_key: return None, ["❌ Chave API não encontrada."]
+        if not api_key: return None, ["❌ Sem Chave API."]
         
-        embeddings = OpenAIEmbeddings(openai_api_key=api_key, chunk_size=1000)
-        vectorstore = FAISS.from_texts(texts=chunks, embedding=embeddings)
+        embeddings = OpenAIEmbeddings(openai_api_key=api_key)
+        
+        # --- A CORREÇÃO MÁGICA (BATCH PROCESSING) ---
+        # Enviamos para a OpenAI em lotes pequenos para não estourar o limite de 300k
+        vectorstore = None
+        batch_size = 100 # Processa 100 pedaços por vez
+        
+        total_batches = len(chunks) // batch_size + 1
+        st.toast(f"📚 Indexando {len(chunks)} trechos jurídicos em {total_batches} lotes...")
+        
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i : i + batch_size]
+            if not batch: continue
+            
+            if vectorstore is None:
+                vectorstore = FAISS.from_texts(batch, embeddings)
+            else:
+                vectorstore.add_texts(batch)
+            
+            # Pequena pausa para garantir estabilidade
+            time.sleep(0.5)
+            
         return vectorstore, files_log
         
     except Exception as e:
-        error_msg = str(e)
-        if "insufficient_quota" in error_msg:
-            return None, ["💸 ERRO DE SALDO: Sua conta OpenAI está sem créditos. Adicione fundos em platform.openai.com."]
-        return None, [f"❌ Erro Técnico: {error_msg}"]
+        return None, [f"❌ Erro Técnico: {str(e)}"]
 
 # --- 3. CÉREBRO ---
 def create_chain():
     prompt_template = """
     Você é um Auditor Sênior Especialista em Licitações (Lei 14.133/21).
-    INSTRUÇÃO DE VARREDURA:
-    1. LEIA O TEXTO INTEIRO.
-    2. Se não achar requisito na Habilitação, busque no resto do documento (Minuta, Anexos, TR).
-    3. Cruze com a Jurisprudência fornecida.
+    INSTRUÇÃO: LEIA O TEXTO INTEIRO. Se não achar requisito na Habilitação, busque no resto do documento.
     
     TEMA: {question}
     CONTEXTO JURÍDICO: {context}
     
     PARECER:
-    - Irregularidade Grave: "🚨 ALERTA".
-    - Ressalva (Item deslocado): "⚠️ RESSALVA" (Explique onde encontrou).
-    - Conforme: "✅ CONFORME" (Cite o item).
+    - Irregularidade: "🚨 ALERTA".
+    - Ressalva (Item deslocado): "⚠️ RESSALVA".
+    - Conforme: "✅ CONFORME".
     """
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     model = ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=api_key)
@@ -130,9 +126,9 @@ def robust_audit_run(vectorstore, final_query, docs_lei):
         try:
             return chain.run(input_documents=docs_lei, question=final_query)
         except Exception as e:
-            if "insufficient_quota" in str(e): return "💸 FALHA CRÍTICA: Saldo da OpenAI esgotado."
+            if "insufficient_quota" in str(e): return "💸 FALHA: Saldo Esgotado."
             if "429" in str(e):
-                time.sleep(10) # Espera 10s e tenta de novo
+                time.sleep(15)
                 continue
             return f"Erro: {str(e)}"
     return "⚠️ Sistema ocupado. Tente novamente."
@@ -150,7 +146,7 @@ def process_audit_full(vectorstore, uploaded_file, audit_protocol):
     results = []
     status = st.empty()
     progress = st.progress(0)
-    st.info("🚀 Auditoria em andamento (GPT-4o).")
+    st.info("🚀 Auditoria Premium em andamento (GPT-4o).")
     
     for i, (area, comando) in enumerate(audit_protocol):
         status.markdown(f"**🕵️ Auditando:** {area}...")
@@ -170,85 +166,58 @@ def main():
         st.markdown("### 🔐 Acesso Restrito")
         if not st.session_state['logged']:
             key = st.text_input("Chave de Acesso", type="password")
-            if st.button("Entrar no Sistema"):
+            if st.button("Entrar"):
                 if check_login(key) > -1:
                     st.session_state['logged'] = True
                     st.session_state['user_key'] = key
                     st.rerun()
-                else: st.error("Credencial Inválida.")
+                else: st.error("Negado.")
         else:
-            st.success(f"Logado: {st.session_state.get('user_key')}")
+            st.success(f"Licença: {st.session_state.get('user_key')}")
             if st.button("Sair"):
                 st.session_state['logged'] = False
                 st.rerun()
-            st.markdown("---")
-            st.caption("Licença Corporativa: AguiarGov")
 
     if not st.session_state['logged']:
-        # LANDING PAGE COM REDAÇÃO DE VENDA (V9.0)
         st.markdown("<div class='landing-header'>🏛️ LICI TECHGOV</div>", unsafe_allow_html=True)
         st.markdown("<div class='landing-sub'>Inteligência Artificial de Alta Precisão para Gestão Pública</div>", unsafe_allow_html=True)
-        
         c1, c2, c3 = st.columns(3)
-        with c1:
-            st.markdown("""
-            <div class='feature-card'>
-            <h4>🔍 Auditoria Jurídica 360º</h4>
-            <p>Varredura completa baseada na <strong>Lei 14.133/21</strong> e cruzamento em tempo real com a <strong>Jurisprudência do TCU/TCE</strong>.</p>
-            </div>
-            """, unsafe_allow_html=True)
-        with c2:
-            st.markdown("""
-            <div class='feature-card'>
-            <h4>⚡ Inteligência Artificial Premium</h4>
-            <p>Motor GPT-4o calibrado para identificar riscos ocultos, omissões de garantias e cláusulas restritivas.</p>
-            </div>
-            """, unsafe_allow_html=True)
-        with c3:
-            st.markdown("""
-            <div class='feature-card'>
-            <h4>🛡️ Segurança Jurídica e Blindagem</h4>
-            <p>Garanta editais robustos e reduza impugnações com análises preditivas antes da publicação.</p>
-            </div>
-            """, unsafe_allow_html=True)
+        with c1: st.markdown("<div class='feature-card'><h4>🔍 Auditoria Jurídica 360º</h4><p>Cruzamento em tempo real com Lei 14.133/21 e Jurisprudência.</p></div>", unsafe_allow_html=True)
+        with c2: st.markdown("<div class='feature-card'><h4>⚡ IA Premium GPT-4o</h4><p>Precisão máxima para identificar riscos e omissões.</p></div>", unsafe_allow_html=True)
+        with c3: st.markdown("<div class='feature-card'><h4>🛡️ Segurança Jurídica</h4><p>Blindagem de editais e redução de impugnações.</p></div>", unsafe_allow_html=True)
 
     else:
-        st.title("🏛️ AUDITOR LICI TECHGOV (v9.0)")
+        st.title("🏛️ AUDITOR LICI TECHGOV (v9.1)")
         
         if 'vectorstore' not in st.session_state:
-            with st.spinner("Inicializando Base de Conhecimento Jurídico..."):
+            with st.spinner("Construindo Cérebro Jurídico (Processamento em Lotes)..."):
                 vs, logs = load_knowledge_base()
                 if vs: st.session_state['vectorstore'] = vs
                 else: 
-                    st.error("Erro na Base de Dados.")
-                    with st.expander("Ver Detalhes"):
+                    st.error("Falha na Base de Dados.")
+                    with st.expander("Logs"):
                         for log in logs: st.write(log)
         
         if st.session_state.get('vectorstore'):
             col1, col2 = st.columns([1, 2])
             with col1:
-                st.info("📂 Parâmetros da Análise")
-                doc_type = st.radio("Tipo de Documento:", ["EDITAL", "ETP", "TR / PROJETO BÁSICO"])
-                uploaded = st.file_uploader("Upload do Arquivo (PDF)", type="pdf")
-                start = st.button("🔍 EXECUTAR VARREDURA", type="primary")
+                st.info("📂 Parâmetros")
+                doc_type = st.radio("Documento:", ["EDITAL", "ETP", "TR"])
+                uploaded = st.file_uploader("Arquivo PDF", type="pdf")
+                start = st.button("🔍 INICIAR AUDITORIA", type="primary")
 
             with col2:
                 if uploaded and start:
                     if doc_type == "EDITAL":
-                        prot = [
-                            ("1. Legalidade e Fundamentação", "Verifique legalidade do objeto, Lei 14.133/21 e Jurisprudência."), 
-                            ("2. Habilitação (Varredura Total)", "Analise Habilitação. Busque CNDT, PcD e Balanço no DOCUMENTO INTEIRO antes de apontar omissão."), 
-                            ("3. Financeiro e Garantias", "Verifique orçamento, reajuste e garantias."), 
-                            ("4. Ritos e Prazos", "Verifique prazos e validade das propostas.")
-                        ]
+                        prot = [("1. Legalidade", "Lei 14.133."), ("2. Habilitação", "Varredura Total (CNDT/PcD/Balanço)."), ("3. Financeiro", "Orçamento/Garantia."), ("4. Ritos", "Prazos.")]
                     elif doc_type == "ETP":
-                        prot = [("1. Necessidade e PCA", "Necessidade pública e PCA."), ("2. Solução", "Alternativas e estimativa."), ("3. Parcelamento", "Justificativa (Súmula 247)."), ("4. Viabilidade", "Valor e Conclusão.")]
+                        prot = [("1. Necessidade", "PCA."), ("2. Solução", "Mercado."), ("3. Parcelamento", "Súmula 247."), ("4. Viabilidade", "Valor.")]
                     else:
-                        prot = [("1. Técnica", "Objeto e quantitativos."), ("2. Gestão", "Fiscalização."), ("3. Pagamento", "Medição e pagamento."), ("4. Sanções", "Obrigações e sanções.")]
+                        prot = [("1. Técnica", "Objeto."), ("2. Gestão", "Fiscalização."), ("3. Pagamento", "Medição."), ("4. Sanções", "Obrigações.")]
 
                     res = process_audit_full(st.session_state['vectorstore'], uploaded, prot)
                     
-                    st.subheader("📋 Relatório de Auditoria")
+                    st.subheader("📋 Relatório")
                     for a, t in res:
                         if "ALERTA" in t or "FALHA" in t: st.markdown(f"<div class='alert-box'><h3>{a}</h3>{t}</div>", unsafe_allow_html=True)
                         elif "CONFORME" in t: st.markdown(f"<div class='success-box'><h3>{a}</h3>{t}</div>", unsafe_allow_html=True)
