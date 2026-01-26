@@ -1,249 +1,187 @@
 import streamlit as st
 import os
-import time
-from PyPDF2 import PdfReader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain.chains.question_answering import load_qa_chain
+from pypdf import PdfReader
+from langchain_openai import ChatOpenAI
 from langchain.prompts import PromptTemplate
+from dotenv import load_dotenv
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="LICI TECHGOV", page_icon="🏛️", layout="wide")
+# Configuração da Página
+st.set_page_config(page_title="Lici Auditor v10", page_icon="⚖️", layout="wide")
 
-# --- CSS VISUAL PROFISSIONAL ---
+# CSS para visual profissional (Esconde menus de dev e melhora a UI)
 st.markdown("""
 <style>
-    .alert-box { background-color: #ffe6e6; border-left: 6px solid #ff4b4b; padding: 15px; margin-bottom: 20px; border-radius: 5px; color: #333; }
-    .success-box { background-color: #e6fffa; border-left: 6px solid #00cc99; padding: 15px; margin-bottom: 20px; border-radius: 5px; color: #333; }
-    .neutral-box { background-color: #f0f2f6; border-left: 6px solid #555; padding: 15px; margin-bottom: 20px; border-radius: 5px; color: #333; }
-    .warning-box { background-color: #fff3cd; border-left: 6px solid #ffecb5; padding: 15px; margin-bottom: 20px; border-radius: 5px; color: #664d03; }
-    
-    .landing-header { font-size: 3em; font-weight: bold; color: #1E3A8A; text-align: center; margin-bottom: 0.2em; text-transform: uppercase; letter-spacing: 2px; }
-    .landing-sub { font-size: 1.4em; color: #555; text-align: center; margin-bottom: 3em; font-weight: 300; }
-    .feature-card { background-color: #ffffff; padding: 30px; border-radius: 15px; box-shadow: 0 10px 20px rgba(0,0,0,0.08); text-align: center; height: 100%; border-top: 5px solid #1E3A8A; transition: transform 0.3s ease; }
-    .feature-card:hover { transform: translateY(-5px); }
-    [data-testid="stSidebar"] { background-color: #f8f9fa; border-right: 1px solid #dee2e6; }
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    .stApp {background-color: #f8f9fa;}
+    .css-1d391kg {padding-top: 1rem;}
+    .stAlert {font-weight: bold;}
+    h1 {color: #0f2c4a;}
+    h2 {color: #1c4b75;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- SESSÃO ---
-if 'logged' not in st.session_state: st.session_state['logged'] = False
+# Barra Lateral
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/10325/10325149.png", width=100)
+    st.title("Lici Auditor ⚖️")
+    st.info("Versão 10.0 - Lei 14.133/21")
+    st.markdown("---")
+    api_key = st.text_input("Insira sua API Key OpenAI:", type="password")
+    if api_key:
+        os.environ["OPENAI_API_KEY"] = api_key
 
-# --- 1. LOGIN ---
-def check_login(key):
-    users = {"AMIGO_TESTE": 3, "PREFEITURA_X": 10, "GUSTAVO_ADMIN": 999}
-    return users.get(key, -1)
-
-# --- 2. CARREGAMENTO DA BASE (BATCHING) ---
-@st.cache_resource(show_spinner=False)
-def load_knowledge_base():
+# Funções Auxiliares
+def get_pdf_text(pdf_docs):
     text = ""
-    data_folder = "data"
-    
-    if not os.path.exists(data_folder):
-        try: os.makedirs(data_folder); return None, ["⚠️ Pasta 'data' criada."]
-        except: return None, ["❌ Erro de permissão."]
+    for pdf in pdf_docs:
+        pdf_reader = PdfReader(pdf)
+        for page in pdf_reader.pages:
+            text += page.extract_text()
+    return text
 
-    files_log = []
-    for root, dirs, files in os.walk(data_folder):
-        for filename in files:
-            if filename.lower().endswith('.pdf'):
-                try:
-                    pdf_reader = PdfReader(os.path.join(root, filename))
-                    for page in pdf_reader.pages:
-                        if page.extract_text(): text += f"\n[FONTE DE CONTEXTO: {filename}] {page.extract_text()}"
-                    files_log.append(f"✅ Lido: {filename}")
-                except: continue
+def get_audit_prompt(doc_type):
+    # PROMPTS ESPECIALIZADOS BASEADOS NA LEI 14.133
     
-    if not text: return None, ["⚠️ Base vazia ou sem OCR."]
-
-    try:
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
-        chunks = text_splitter.split_text(text)
+    if doc_type == "Edital de Licitação":
+        return """
+        Você é um Auditor Especialista em Licitações Públicas no Brasil (Lei 14.133/2021).
+        Analise o texto do EDITAL abaixo com rigor extremo.
         
-        api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-        if not api_key: return None, ["❌ Sem API Key."]
-        
-        embeddings = OpenAIEmbeddings(openai_api_key=api_key)
-        vectorstore = None
-        batch_size = 50 
-        
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i : i + batch_size]
-            if not batch: continue
-            if vectorstore is None: vectorstore = FAISS.from_texts(batch, embeddings)
-            else: vectorstore.add_texts(batch)
-            time.sleep(0.2)
-            
-        return vectorstore, files_log
-    except Exception as e:
-        return None, [f"❌ Erro Técnico: {str(e)}"]
+        Sua análise deve ser dividida nas seguintes seções obrigatórias:
 
-# --- 3. CÉREBRO JURÍDICO (PROMPT BLINDADO ANTI-ALUCINAÇÃO) ---
-def create_chain(model_name="gpt-4o"):
-    prompt_template = """
-    Você é um Auditor Sênior Especialista em Licitações (Lei 14.133/21).
-    
-    ESTRUTURA DE ANÁLISE:
-    1. DOC_ALVO: É o documento que o usuário fez upload. SUA ANÁLISE DEVE SER 100% BASEADA NELE.
-    2. CONTEXTO_JURIDICO: São leis e acórdãos apenas para REFERÊNCIA COMPARATIVA.
-    
-    REGRA DE OURO (ANTI-ALUCINAÇÃO):
-    - JAMAIS atribua fatos do CONTEXTO_JURIDICO ao DOC_ALVO. 
-    - Se o CONTEXTO falar de "Medicamentos em José do Calçado" e o DOC_ALVO for sobre "Imigração", IGNORE o contexto e diga que o DOC_ALVO não trata de licitação.
-    
-    TEMA DA VARREDURA: {question}
-    
-    CONTEXTO_JURIDICO (Use APENAS como base legal, NÃO como fato do caso):
-    {context}
-    
-    PARECER DO AUDITOR:
-    - Se o DOC_ALVO não for pertinente ao tema (ex: documento de imigração, receita médica): Responda "⚠️ DOCUMENTO INVÁLIDO: O arquivo analisado não parece ser uma peça técnica de licitação."
-    - Irregularidade no DOC_ALVO: "🚨 ALERTA".
-    - Ressalva: "⚠️ RESSALVA".
-    - Conforme: "✅ CONFORME".
-    """
-    api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-    model = ChatOpenAI(model=model_name, temperature=0, openai_api_key=api_key)
-    return load_qa_chain(model, chain_type="stuff", prompt=PromptTemplate(template=prompt_template, input_variables=["context", "question"]))
+        1. ASPECTOS LEGAIS E ESTRUTURAIS
+        - Verifique se cita a Lei 14.133/2021.
+        - Objeto: Está claro e sem direcionamento de marca?
+        - Critério de Julgamento: Está definido?
+        - Minuta do Contrato e Matriz de Risco: CONSTAM? Se não, aponte como FALHA GRAVE.
+        - Orçamento/Reajuste: Se não encontrar aqui, diga "Não encontrado no Edital - Verificar TR".
 
-# --- 4. MOTOR HÍBRIDO ---
-def smart_audit_run(vectorstore, final_query, docs_lei):
-    try:
-        chain = create_chain("gpt-4o")
-        return chain.run(input_documents=docs_lei, question=final_query), "premium"
-    except Exception as e:
-        error_msg = str(e)
-        if "429" in error_msg or "Request too large" in error_msg:
-            try:
-                chain_turbo = create_chain("gpt-4o-mini")
-                return chain_turbo.run(input_documents=docs_lei, question=final_query), "turbo"
-            except Exception as e2:
-                return f"⚠️ Erro Crítico: Documento muito grande. (Erro: {str(e2)})", "error"
-        elif "insufficient_quota" in error_msg:
-            return "💸 FALHA: Saldo da OpenAI Esgotado.", "error"
-        return f"⚠️ Erro Técnico: {error_msg}", "error"
+        2. HABILITAÇÃO E PARTICIPAÇÃO (Foco em Restrições)
+        - Verifique Habilitação Jurídica, Fiscal, Social, Trabalhista.
+        - ALERTA VERMELHO: Procure por exigências restritivas (ex: comprovação de regularidade APENAS para assinatura do contrato vs habilitação). Cite jurisprudência se houver restrição indevida.
+        - Qualificação Econômica: Índices são proporcionais?
+        - Qualificação Técnica: Atestados são compatíveis?
 
-# --- 5. PROCESSAMENTO ---
-def process_audit_full(vectorstore, uploaded_file, audit_protocol):
-    reader = PdfReader(uploaded_file)
-    doc_text = ""
-    for i, page in enumerate(reader.pages):
-        if page.extract_text(): doc_text += f"\n--- PÁGINA {i+1} ---\n{page.extract_text()}"
-    
-    if len(doc_text) < 50: return [("Erro", "Arquivo vazio.")]
+        3. REQUISITOS ESSENCIAIS
+        - Amostras: Se exigidas, há regra clara?
+        - Modo de Disputa: Aberto/Fechado definido?
+        - Prazos: Respeitam a Lei 14.133?
+        - ME/EPP: Prevê tratamento diferenciado?
 
-    results = []
-    status = st.empty()
-    progress = st.progress(0)
+        TEXTO DO DOCUMENTO:
+        {text}
+
+        SAÍDA ESPERADA:
+        Para cada item, diga "CONFORME" ou "NÃO CONFORME/AUSENTE".
+        Se encontrar cláusula restritiva ou ilegal, inicie a linha com "🚨 ALERTA VERMELHO:".
+        Cite o artigo da lei ou jurisprudência (TCU) aplicável em cada análise negativa.
+        Ao final, faça um "RELATÓRIO DE PENDÊNCIAS" resumindo o que falta.
+        """
+
+    elif doc_type == "Estudo Técnico Preliminar (ETP)":
+        return """
+        Você é um Auditor da Lei 14.133/21. Analise este ETP com base estrita no Art. 18, §1º.
+        Verifique a presença e qualidade de CADA um dos seguintes incisos:
+
+        I - Descrição da necessidade (Problema a ser resolvido).
+        II - Previsão no PCA (Plano de Contratações Anual).
+        III - Requisitos da contratação.
+        IV - Estimativas de quantidades (com memória de cálculo).
+        V - Levantamento de mercado e justificativa da solução.
+        VI - Estimativa do valor (com preços unitários).
+        VII - Descrição da solução como um todo.
+        VIII - Justificativa de parcelamento.
+        IX - Resultados pretendidos (economicidade/eficiência).
+        X - Providências prévias (inclusive capacitação).
+        XI - Contratações correlatas.
+        XII - Impactos ambientais e medidas mitigadoras.
+        XIII - Posicionamento conclusivo sobre adequação.
+
+        TEXTO DO DOCUMENTO:
+        {text}
+
+        SAÍDA ESPERADA:
+        Liste inciso por inciso. Se estiver ausente ou genérico, marque com "🚨 ERRO".
+        Cite o Art. 18 da Lei 14.133 em itens faltantes.
+        """
+
+    elif doc_type == "Termo de Referência (TR)":
+        return """
+        Você é um Auditor da Lei 14.133/21. Analise este Termo de Referência (TR) com base no Art. 6º, XXIII.
+        Verifique obrigatoriamente:
+
+        a) Definição do objeto, quantitativos e prazo.
+        b) Fundamentação (referência ao ETP).
+        c) Descrição da solução (ciclo de vida).
+        d) Requisitos da contratação.
+        e) Modelo de execução.
+        f) Modelo de gestão (fiscalização).
+        g) Critérios de medição e pagamento.
+        h) Forma de seleção do fornecedor.
+        i) Estimativas de valor e adequação orçamentária (Se não constava no edital, É OBRIGATÓRIO AQUI).
+
+        TEXTO DO DOCUMENTO:
+        {text}
+
+        SAÍDA ESPERADA:
+        Analise item a item. Se faltar a adequação orçamentária ou reajuste aqui (e não estava no edital), gere um ALERTA CRÍTICO.
+        """
     
-    st.info("🚀 Auditoria Iniciada. Cruzando dados com Jurisprudência (Sem contaminação).")
-    
-    for i, (area, comando) in enumerate(audit_protocol):
-        status.markdown(f"**🕵️ Auditando:** {area}...")
+    else: # Projeto Básico
+        return """
+        Analise este Projeto Básico com base no Art. 6º, XXV da Lei 14.133/21.
+        Verifique: Levantamentos topográficos, soluções técnicas, tipos de serviços, métodos construtivos, orçamento detalhado (custo global).
         
-        # Busca contexto mas o prompt agora sabe separar
-        docs_lei = vectorstore.similarity_search(comando, k=5)
-        
-        # Deixamos CLARO o que é o documento do usuário
-        final_query = f"DOC_ALVO (TEXTO DO USUÁRIO): {doc_text}\n\nTAREFA: Auditar o item '{area}' com foco em: {comando}"
-        
-        resp, motor = smart_audit_run(vectorstore, final_query, docs_lei)
-        
-        if motor == "turbo": resp += "\n\n*(Nota: Processado via Motor Turbo)*"
-            
-        results.append((area, resp))
-        progress.progress((i + 1) / len(audit_protocol))
-        time.sleep(1)
-        
-    status.empty()
-    return results
+        TEXTO DO DOCUMENTO:
+        {text}
+        """
 
-# --- 6. INTERFACE ---
-def main():
-    with st.sidebar:
-        st.markdown("### 🔐 Acesso Restrito")
-        if not st.session_state['logged']:
-            key = st.text_input("Chave de Acesso", type="password")
-            if st.button("Entrar"):
-                if check_login(key) > -1:
-                    st.session_state['logged'] = True
-                    st.session_state['user_key'] = key
-                    st.rerun()
-                else: st.error("Negado.")
-        else:
-            st.success(f"Logado: {st.session_state.get('user_key')}")
-            if st.button("Sair"):
-                st.session_state['logged'] = False
-                st.rerun()
+# Interface Principal
+st.title("Lici Auditor v10 🏛️")
+st.markdown("### Auditoria Jurídica Inteligente - Lei 14.133/21")
 
-    if not st.session_state['logged']:
-        st.markdown("<div class='landing-header'>🏛️ LICI TECHGOV</div>", unsafe_allow_html=True)
-        st.markdown("<div class='landing-sub'>Inteligência Artificial de Alta Precisão para Gestão Pública</div>", unsafe_allow_html=True)
-        c1, c2, c3 = st.columns(3)
-        with c1: st.markdown("""<div class='feature-card'><h4>🔍 Auditoria 360º</h4><p>Lei 14.133/21 + Jurisprudência TCU/TCE.</p></div>""", unsafe_allow_html=True)
-        with c2: st.markdown("""<div class='feature-card'><h4>⚡ IA Premium</h4><p>Motor Híbrido Anti-Falha (GPT-4o).</p></div>""", unsafe_allow_html=True)
-        with c3: st.markdown("""<div class='feature-card'><h4>🛡️ Blindagem</h4><p>Reduza impugnações com análise preditiva.</p></div>""", unsafe_allow_html=True)
+# Seleção do Tipo de Documento
+doc_type = st.selectbox(
+    "Qual documento você vai auditar?",
+    ["Edital de Licitação", "Estudo Técnico Preliminar (ETP)", "Termo de Referência (TR)", "Projeto Básico"]
+)
 
+# Upload de Arquivo
+uploaded_file = st.file_uploader("Faça upload do documento (PDF)", type="pdf")
+
+if uploaded_file and st.button("🔍 Iniciar Auditoria Blindada"):
+    if not os.environ.get("OPENAI_API_KEY"):
+        st.error("Por favor, insira a API Key na barra lateral.")
     else:
-        st.title("🏛️ AUDITOR LICI TECHGOV (v9.4)")
-        
-        if 'vectorstore' not in st.session_state:
-            with st.spinner("Carregando Base Jurídica..."):
-                vs, logs = load_knowledge_base()
-                if vs: st.session_state['vectorstore'] = vs
-                else: 
-                    st.error("Base não carregada.")
-                    with st.expander("Logs"):
-                        for log in logs: st.write(log)
-        
-        if st.session_state.get('vectorstore'):
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                st.info("📂 Configuração")
-                # MENU ATUALIZADO COM TR E PROJETO BÁSICO SEPARADOS
-                doc_type = st.radio("Tipo de Documento:", 
-                                  ["EDITAL", "ETP", "TR (Bens/Serviços)", "PROJETO BÁSICO (Obras/Engenharia)"])
+        with st.spinner(f"Lendo documento e cruzando com a Lei 14.133 e Jurisprudência..."):
+            # 1. Extrair Texto
+            raw_text = get_pdf_text([uploaded_file])
+            
+            # 2. Preparar a IA
+            llm = ChatOpenAI(model_name="gpt-4-turbo", temperature=0) # Usando GPT-4 Turbo para maior precisão jurídica
+            
+            # 3. Selecionar Prompt
+            audit_prompt = get_audit_prompt(doc_type)
+            prompt = PromptTemplate(template=audit_prompt, input_variables=["text"])
+            
+            # 4. Executar Análise
+            try:
+                final_prompt = prompt.format(text=raw_text[:80000]) # Limite seguro de caracteres
+                response = llm.invoke(final_prompt)
                 
-                uploaded = st.file_uploader("Arquivo PDF", type="pdf")
-                start = st.button("🔍 EXECUTAR AUDITORIA", type="primary")
-
-            with col2:
-                if uploaded and start:
-                    
-                    # PROTOCOLOS ATUALIZADOS
-                    if doc_type == "EDITAL":
-                        prot = [("1. Legalidade", "Legalidade objeto e Lei 14.133."), ("2. Habilitação", "Varredura CNDT/PcD/Balanço."), ("3. Financeiro", "Orçamento/Garantia."), ("4. Ritos", "Prazos.")]
-                    
-                    elif doc_type == "ETP":
-                        prot = [("1. Necessidade", "PCA e Interesse Público."), ("2. Solução", "Estudo de Mercado e Alternativas."), ("3. Parcelamento", "Justificativa Súmula 247."), ("4. Viabilidade", "Estimativa Valor.")]
-                    
-                    elif "TR" in doc_type: # TR (Bens/Serviços Comuns)
-                        prot = [
-                            ("1. Definição do Objeto", "Especificação técnica, vedação a marca (ou justificativa) e quantitativos."),
-                            ("2. Gestão do Contrato", "Fiscalização, recebimento provisório/definitivo e prazos."),
-                            ("3. Pagamento e Sanções", "Critérios de medição, pagamento e rol de sanções."),
-                            ("4. Exigências Técnicas", "Qualificação técnica compatível e amostras (se houver).")
-                        ]
-                        
-                    elif "PROJETO BÁSICO" in doc_type: # Obras/Engenharia
-                        prot = [
-                            ("1. Engenharia e Custos", "Cronograma físico-financeiro, BDI detalhado e Planilha Orçamentária (SINAPI/SICRO)."),
-                            ("2. Licenciamento e Matriz de Risco", "Licenciamento ambiental, desapropriações e Matriz de Riscos (Obrigatório)."),
-                            ("3. Qualificação Técnica", "Atestados, CAT e visita técnica (justificada)."),
-                            ("4. Execução e Medição", "Critérios de medição, reajustamento e subcontratação.")
-                        ]
-
-                    res = process_audit_full(st.session_state['vectorstore'], uploaded, prot)
-                    
-                    st.subheader("📋 Relatório")
-                    for a, t in res:
-                        if "INVÁLIDO" in t: st.markdown(f"<div class='neutral-box'><h3>{a}</h3>{t}</div>", unsafe_allow_html=True)
-                        elif "ALERTA" in t: st.markdown(f"<div class='alert-box'><h3>{a}</h3>{t}</div>", unsafe_allow_html=True)
-                        elif "RESSALVA" in t: st.markdown(f"<div class='warning-box'><h3>{a}</h3>{t}</div>", unsafe_allow_html=True)
-                        elif "CONFORME" in t: st.markdown(f"<div class='success-box'><h3>{a}</h3>{t}</div>", unsafe_allow_html=True)
-                        else: st.markdown(f"<div class='neutral-box'><h3>{a}</h3>{t}</div>", unsafe_allow_html=True)
-
-if __name__ == "__main__":
-    main()
+                # 5. Exibir Resultado
+                st.success("Auditoria Concluída!")
+                st.markdown("### 📋 Relatório de Análise")
+                st.markdown(response.content)
+                
+                # Botão para baixar relatório
+                st.download_button(
+                    label="📥 Baixar Relatório",
+                    data=response.content,
+                    file_name=f"Auditoria_{doc_type}.md",
+                    mime="text/markdown"
+                )
+                
+            except Exception as e:
+                st.error(f"Erro durante a análise: {e}")
