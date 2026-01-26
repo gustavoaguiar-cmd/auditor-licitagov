@@ -4,17 +4,17 @@ FROM python:3.9-slim
 # Define o diretório de trabalho
 WORKDIR /app
 
-# Instala ferramentas básicas do sistema
+# Instala apenas o essencial (build-essential para compilar e curl para checar saúde)
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
-    software-properties-common \
     && rm -rf /var/lib/apt/lists/*
 
 # Copia os arquivos do projeto para o servidor
 COPY . .
 
-# Instala as bibliotecas do requirements.txt
+# Atualiza o pip e instala as bibliotecas
+RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Expõe a porta padrão do Streamlit
