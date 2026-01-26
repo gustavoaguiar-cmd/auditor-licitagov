@@ -1,8 +1,9 @@
 streamlit
 openai
-langchain==0.1.20
-langchain-community==0.0.38
-langchain-openai==0.1.6
-faiss-cpu
-PyPDF2
+langchain
+langchain-openai
+langchain-community
+pypdf
+python-dotenv
 tiktoken
+faiss-cpu
