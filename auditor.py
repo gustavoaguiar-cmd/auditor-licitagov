@@ -41,36 +41,39 @@ def check_login():
 
 @st.cache_resource
 def load_knowledge_base():
-    """Lê todos os PDFs da pasta data/legislacao e cria um índice de busca"""
+    """Lê PDFs recursivamente em data/legislacao e TODAS as subpastas"""
     docs = []
     folder_path = "data/legislacao"
     
     if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
         return None
 
-    # Varre a pasta
-    for filename in os.listdir(folder_path):
-        if filename.endswith(".pdf"):
-            file_path = os.path.join(folder_path, filename)
-            try:
-                reader = PdfReader(file_path)
-                text = ""
-                for page in reader.pages:
-                    if page.extract_text():
-                        text += page.extract_text()
-                docs.append(Document(page_content=text, metadata={"source": filename}))
-            except:
-                pass
+    # CORREÇÃO CRÍTICA: Usa os.walk para entrar nas subpastas (doutrina, tcu, tce...)
+    for root, dirs, files in os.walk(folder_path):
+        for filename in files:
+            if filename.lower().endswith(".pdf"):
+                file_path = os.path.join(root, filename)
+                try:
+                    reader = PdfReader(file_path)
+                    text = ""
+                    for page in reader.pages:
+                        if page.extract_text():
+                            text += page.extract_text()
+                    if text: # Só adiciona se extraiu texto
+                        # Adiciona metadados com o nome do arquivo para o Auditor citar a fonte
+                        docs.append(Document(page_content=text, metadata={"source": filename}))
+                except Exception as e:
+                    print(f"Erro ao ler {filename}: {e}")
+                    pass
     
     if not docs:
         return None
 
-    # Quebra em pedaços menores para busca
+    # Quebra em pedaços para a IA conseguir ler
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     splits = text_splitter.split_documents(docs)
     
-    # Cria o Banco Vetorial (FAISS)
+    # Cria o cérebro de busca (Vector Store)
     embeddings = OpenAIEmbeddings()
     vectorstore = FAISS.from_documents(splits, embeddings)
     return vectorstore
@@ -86,57 +89,50 @@ def get_pdf_text(pdf_docs):
 
 def get_audit_prompt(doc_type):
     return """
-    Você é um Auditor de Controle Externo Sênior (perfil TCE/ES e TCU).
-    Sua missão não é apenas dizer se está legal, mas encontrar RISCOS e CLÁUSULAS RESTRITIVAS, mesmo que justificadas.
+    Você é um Auditor de Controle Externo Sênior (perfil rigoroso do TCE/ES e TCU).
+    Sua missão é cruzar o Edital com a Lei 14.133 e a JURISPRUDÊNCIA fornecida.
 
-    USE O CONTEXTO ABAIXO (Jurisprudência/Manual) PARA EMBASAR SUA ANÁLISE:
+    CONTEXTO JURÍDICO (Use estas fontes para fundamentar):
     {context}
 
-    ANÁLISE O DOCUMENTO:
+    DOCUMENTO EM ANÁLISE:
     {text}
 
     ---
-    DIRETRIZES DE AUDITORIA FINA (TCE/ES):
+    DIRETRIZES DE ANÁLISE PROFUNDA:
     
-    1. HABILITAÇÃO TÉCNICA (O Ponto Crítico):
-       - Verifique exigências de quantitativos mínimos (ex: "X kWp", "Y metros"). Calcule mentalmente se parecem ultrapassar 50% do objeto (Súmula TCU 263).
-       - Procure siglas como CMVP, PMP, ISO. Se encontrar, VERIFIQUE SE HÁ JUSTIFICATIVA TÉCNICA no texto.
-       - Se houver exigência e houver justificativa: Classifique como "⚠️ CLÁUSULA DE RISCO (JUSTIFICADA)". Explique que restringe a competição, mas foi motivado.
-       - Se houver exigência SEM justificativa: Classifique como "🚨 ILEGALIDADE (RESTRITIVO)".
-    
+    1. HABILITAÇÃO TÉCNICA (Foco em Restrição):
+       - Atestados: Verifique se a exigência (ex: 25kWp) ultrapassa 50% do objeto. Se o edital justificou, diga "⚠️ RISCO JUSTIFICADO". Se não, "🚨 IRREGULAR (Súmula TCU 263)".
+       - Certificações (CMVP, ISO, PMP): São exigíveis? O TCU diz que não podem ser eliminatórias, apenas pontuação técnica (Acórdão 455/2021). Se for eliminatória, marque ERRO.
+       
     2. HABILITAÇÃO ECONÔMICA:
-       - Capital Social > 10% do estimado? (Risco à competitividade).
-       - Índices de Liquidez > 1.0 (Aceitável) vs > 1.5 (Restritivo).
+       - Capital Social/Patrimônio Líquido: Exigências acima de 10% do valor estimado são ILEGAIS (Lei 14.133, art. 69). Verifique isso.
 
-    3. ORÇAMENTO E BDI:
-       - Verifique se menciona BDI diferenciado para materiais/equipamentos (Acórdãos recentes do TCU exigem BDI reduzido para mero fornecimento).
-       - Verifique se há matriz de risco.
+    3. MATRIZ DE RISCO E MINUTA:
+       - A ausência da Matriz de Risco é falha grave em obras/serviços grandes. Aponte.
 
     ---
-    FORMATO DO RELATÓRIO FINAL:
+    GERE O RELATÓRIO NESTE FORMATO:
 
     ### 🎯 1. Resumo Executivo
-    (Visão geral da legalidade e risco da licitação)
+    (Parecer geral sobre a viabilidade jurídica do edital).
 
-    ### 🔍 2. Auditoria de Pontos Críticos (Habilitação)
-    * **Item Analisado:** (Citar a cláusula, ex: 10.4 - Atestado de 25kWp)
-    * **Análise do Auditor:** (Explicar se é proporcional. Citar jurisprudência do contexto se houver).
+    ### 🔍 2. Pente Fino (Cláusulas Polêmicas)
+    * **Item Analisado:** (Ex: 10.5 - Exigência de CMVP)
+    * **O que o Edital diz:** ...
+    * **Jurisprudência Cruzada:** (Aqui você DEVE citar o documento do contexto, ex: "Conforme Informativo TCU nº X...")
     * **Veredito:** ✅ REGULAR / ⚠️ RISCO JUSTIFICADO / 🚨 IRREGULAR
 
-    ### 💰 3. Análise Econômica
-    (Índices, BDI e Garantias)
+    ### ⚖️ 3. Análise Econômica
+    (Índices e Patrimônio Líquido).
 
-    ### ⚖️ 4. Cruzamento com Jurisprudência (Banco de Dados)
-    (Cite explicitamente 2 ou 3 decisões/manuais do seu banco de dados que se aplicam a este caso).
-
-    ### 📝 5. Recomendações ao Gestor
-    (O que deve ser melhorado ou justificado melhor).
+    ### 📝 4. Recomendações Corretivas
+    (O que mudar para evitar impugnação).
     """
 
-# --- INTERFACE ---
+# --- INTERFACE DO SISTEMA ---
 st.set_page_config(page_title="Lici Auditor v12 - Expert", page_icon="⚖️", layout="wide")
 
-# CSS Profissional
 st.markdown("""
 <style>
     .stApp {background-color: #f8f9fa;}
@@ -148,52 +144,58 @@ st.markdown("""
 if not check_login():
     st.stop()
 
-# Carrega a "Memória" do Auditor (Jurisprudência)
+# Carrega a API Key
 api_key = os.environ.get("OPENAI_API_KEY")
 if not api_key:
-    st.error("Erro: API Key não configurada no Railway.")
+    st.error("Erro Crítico: API Key não configurada no Railway.")
     st.stop()
 
+# Carrega a Base de Conhecimento (Agora lendo subpastas!)
 with st.sidebar:
     st.markdown("---")
-    st.write("📚 **Base de Conhecimento:**")
-    vectorstore = load_knowledge_base()
+    st.write("📚 **Base Jurídica:**")
+    with st.spinner("Indexando Manuais e Acórdãos..."):
+        vectorstore = load_knowledge_base()
+    
     if vectorstore:
-        st.success("✅ Jurisprudência Carregada (TCU/TCE)")
+        st.success("✅ Biblioteca Jurídica Ativa")
+        st.caption("Lendo pastas: legislacao, tcu_informativos, etc.")
     else:
-        st.warning("⚠️ Nenhuma legislação encontrada em data/legislacao")
+        st.warning("⚠️ Nenhuma legislação encontrada.")
 
 st.title("Lici Auditor v12 🏛️ (Expert Mode)")
-st.markdown("### Auditoria Fina com Cruzamento de Jurisprudência")
+st.markdown("### Auditoria com Inteligência Jurisprudencial")
 
 uploaded_file = st.file_uploader("Faça upload do Edital (PDF)", type="pdf")
 
 if uploaded_file and st.button("🔍 Iniciar Auditoria Profunda"):
-    with st.spinner("Lendo Edital, consultando Jurisprudência e analisando riscos..."):
+    with st.spinner("O Auditor está cruzando o Edital com o Banco de Dados..."):
         try:
             # 1. Extrair Texto do Edital
             raw_text = get_pdf_text([uploaded_file])
             
-            # 2. Buscar Jurisprudência Relevante (RAG)
+            # 2. Busca Inteligente (RAG)
             contexto_juridico = ""
             if vectorstore:
-                # Busca os 4 trechos mais parecidos com o edital no banco de dados
-                docs_rel = vectorstore.similarity_search(raw_text[:4000], k=4) 
+                # Busca os 5 trechos mais relevantes no seu banco de dados
+                docs_rel = vectorstore.similarity_search(raw_text[:4000], k=5) 
                 for doc in docs_rel:
-                    contexto_juridico += f"\n- Fonte: {doc.metadata['source']}\nConteúdo: {doc.page_content[:500]}...\n"
+                    contexto_juridico += f"\n[FONTE: {doc.metadata['source']}]\n{doc.page_content[:600]}...\n"
             else:
-                contexto_juridico = "Base de conhecimento não carregada. Usar conhecimento geral da Lei 14.133."
+                contexto_juridico = "Sem base jurídica carregada."
 
-            # 3. Analisar com GPT-4
+            # 3. Análise GPT-4
             llm = ChatOpenAI(model_name="gpt-4-turbo", temperature=0.1, openai_api_key=api_key)
             
             prompt_template = get_audit_prompt("Edital de Licitação")
             prompt = PromptTemplate(template=prompt_template, input_variables=["context", "text"])
             
+            # Monta o prompt final com o contexto recuperado das pastas
             final_prompt = prompt.format(context=contexto_juridico, text=raw_text[:60000])
             
             response = llm.invoke(final_prompt)
             
+            # 4. Exibe Resultado
             st.markdown(response.content)
             
         except Exception as e:
