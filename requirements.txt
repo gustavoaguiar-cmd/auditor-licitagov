@@ -7,3 +7,4 @@ pypdf
 python-dotenv
 tiktoken
 faiss-cpu
+python-docx
