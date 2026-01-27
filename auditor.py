@@ -97,14 +97,47 @@ if "db_initialized" not in st.session_state:
 # --- MOTOR DE INTELIGÊNCIA (CÉREBRO V15) ---
 @st.cache_resource
 def load_knowledge_base():
+    """Carrega a base de conhecimento com cache em disco."""
     index_path = "faiss_index"
+    folder_path = "data/legislacao" # Certifique-se que esta pasta existe no seu GitHub com os PDFs
     embeddings = OpenAIEmbeddings()
+
+    # 1. Tenta carregar índice salvo
     if os.path.exists(index_path):
         try:
             return FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
         except:
-            return None
-    return None
+            pass
+
+    # 2. Se não existir, cria do zero lendo TUDO
+    docs = []
+    if not os.path.exists(folder_path):
+        return None
+
+    # Varredura completa recursiva
+    for root, dirs, files in os.walk(folder_path):
+        for filename in files:
+            if filename.lower().endswith(".pdf"):
+                file_path = os.path.join(root, filename)
+                try:
+                    reader = PdfReader(file_path)
+                    text = ""
+                    for page in reader.pages:
+                        if page.extract_text():
+                            text += page.extract_text()
+                    if text:
+                        docs.append(Document(page_content=text, metadata={"source": filename}))
+                except:
+                    pass
+    
+    if not docs:
+        return None
+
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    splits = text_splitter.split_documents(docs)
+    vectorstore = FAISS.from_documents(splits, embeddings)
+    vectorstore.save_local(index_path)
+    return vectorstore
 
 def get_pdf_text(pdf_docs):
     text = ""
@@ -401,3 +434,4 @@ elif menu == "Admin":
     df_logs.execute("SELECT * FROM system_logs ORDER BY timestamp DESC LIMIT 10")
     st.table(df_logs.fetchall())
     conn.close()
+
