@@ -97,24 +97,27 @@ if "db_initialized" not in st.session_state:
 # --- MOTOR DE INTELIGÊNCIA (CÉREBRO V15) ---
 @st.cache_resource
 def load_knowledge_base():
-    """Carrega a base de conhecimento com cache em disco."""
+    """
+    Lê TODOS os arquivos da pasta data/legislacao.
+    Usa técnica de 'Lotes' (Batching) para ler tudo sem estourar limite da OpenAI.
+    """
     index_path = "faiss_index"
-    folder_path = "data/legislacao" # Certifique-se que esta pasta existe no seu GitHub com os PDFs
+    folder_path = "data/legislacao"
     embeddings = OpenAIEmbeddings()
 
-    # 1. Tenta carregar índice salvo
+    # 1. Tenta carregar índice salvo do disco (Rápido)
     if os.path.exists(index_path):
         try:
             return FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
         except:
             pass
 
-    # 2. Se não existir, cria do zero lendo TUDO
+    # 2. Se não existir, varre a pasta e lê os PDFs
     docs = []
     if not os.path.exists(folder_path):
         return None
 
-    # Varredura completa recursiva
+    # Varredura completa (Recursiva)
     for root, dirs, files in os.walk(folder_path):
         for filename in files:
             if filename.lower().endswith(".pdf"):
@@ -125,17 +128,33 @@ def load_knowledge_base():
                     for page in reader.pages:
                         if page.extract_text():
                             text += page.extract_text()
+                    
+                    # Só adiciona se tiver texto
                     if text:
                         docs.append(Document(page_content=text, metadata={"source": filename}))
                 except:
-                    pass
+                    print(f"Erro ao ler arquivo: {filename}")
     
     if not docs:
         return None
 
+    # 3. Processamento em Lotes (Batching) - O SEGREDO PARA NÃO TRAVAR
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     splits = text_splitter.split_documents(docs)
-    vectorstore = FAISS.from_documents(splits, embeddings)
+    
+    batch_size = 100 # Envia de 100 em 100 pedaços
+    if len(splits) == 0:
+        return None
+        
+    # Primeiro lote cria o banco
+    vectorstore = FAISS.from_documents(splits[:batch_size], embeddings)
+    
+    # Restante dos lotes são adicionados aos poucos
+    for i in range(batch_size, len(splits), batch_size):
+        batch = splits[i : i + batch_size]
+        if batch:
+            vectorstore.add_documents(batch)
+            
     vectorstore.save_local(index_path)
     return vectorstore
 
@@ -503,3 +522,4 @@ elif menu == "Admin":
             2: "Ação",
             3: "Detalhes"
         }, use_container_width=True)
+
