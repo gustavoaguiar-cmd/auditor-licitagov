@@ -406,32 +406,100 @@ elif menu == "Suporte / Ajuda":
             st.info("(Vídeo tutorial em breve)")
 
 # --- ADMIN ---
+# --- ADMIN (ATUALIZADO PARA GESTÃO) ---
 elif menu == "Admin":
-    st.title("Painel Administrativo")
-    st.subheader("Criar Novo Usuário")
-    with st.form("new_user"):
-        u_login = st.text_input("Login")
-        u_pass = st.text_input("Senha")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        p1 = c1.checkbox("Auditor", True)
-        p2 = c2.checkbox("Gerador")
-        p3 = c3.checkbox("Parecer")
-        p4 = c4.checkbox("PCA")
-        p5 = c5.checkbox("Recursos")
-        if st.form_submit_button("Criar"):
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("INSERT INTO users (username, password, perm_auditor, perm_gerador, perm_parecer, perm_pca, perm_recursos) VALUES (%s, %s, %s, %s, %s, %s, %s)", 
-                        (u_login, u_pass, p1, p2, p3, p4, p5))
-            conn.commit()
-            conn.close()
-            st.success("Usuário Criado!")
+    st.title("⚙️ Gestão de Clientes")
     
-    st.divider()
-    st.subheader("Logs do Sistema")
-    conn = get_db_connection()
-    df_logs = conn.cursor()
-    df_logs.execute("SELECT * FROM system_logs ORDER BY timestamp DESC LIMIT 10")
-    st.table(df_logs.fetchall())
-    conn.close()
+    tab1, tab2, tab3 = st.tabs(["Novo Usuário", "Gerenciar/Bloquear", "Logs do Sistema"])
+    
+    # ABA 1: CRIAR (Igual ao anterior)
+    with tab1:
+        st.subheader("Cadastrar Novo Acesso")
+        with st.form("new_user"):
+            col_a, col_b = st.columns(2)
+            u_login = col_a.text_input("Login (Use prefixo: ex: be_prefeito)")
+            u_pass = col_b.text_input("Senha Provisória")
+            
+            st.markdown("---")
+            st.markdown("**Módulos Contratados:**")
+            c1, c2, c3, c4, c5 = st.columns(5)
+            p1 = c1.checkbox("Auditor", True)
+            p2 = c2.checkbox("Gerador")
+            p3 = c3.checkbox("Parecer")
+            p4 = c4.checkbox("PCA")
+            p5 = c5.checkbox("Recursos")
+            
+            if st.form_submit_button("Criar Usuário"):
+                conn = get_db_connection()
+                try:
+                    cur = conn.cursor()
+                    cur.execute("INSERT INTO users (username, password, perm_auditor, perm_gerador, perm_parecer, perm_pca, perm_recursos) VALUES (%s, %s, %s, %s, %s, %s, %s)", 
+                                (u_login, u_pass, p1, p2, p3, p4, p5))
+                    conn.commit()
+                    st.success(f"✅ Usuário {u_login} criado com sucesso!")
+                except Exception as e:
+                    st.error(f"Erro ao criar (login já existe?): {e}")
+                finally:
+                    conn.close()
 
+    # ABA 2: GERENCIAR (NOVO!)
+    with tab2:
+        st.subheader("Editar, Bloquear ou Excluir")
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT username, role, created_at FROM users ORDER BY username")
+        users = cur.fetchall()
+        conn.close()
+        
+        # Cria uma lista apenas com os nomes para o dropdown
+        user_list = [u[0] for u in users]
+        selected_user = st.selectbox("Selecione o Usuário para editar:", user_list)
+        
+        if selected_user:
+            st.info(f"Editando: **{selected_user}**")
+            
+            col_x, col_y = st.columns(2)
+            with col_x:
+                new_pass_edit = st.text_input("Nova Senha (deixe vazio para não mudar)")
+                if st.button("🔄 Atualizar Senha"):
+                    if new_pass_edit:
+                        conn = get_db_connection()
+                        cur = conn.cursor()
+                        cur.execute("UPDATE users SET password = %s WHERE username = %s", (new_pass_edit, selected_user))
+                        conn.commit()
+                        conn.close()
+                        st.success("Senha alterada!")
+                    else:
+                        st.warning("Digite uma senha nova.")
+            
+            with col_y:
+                st.write("Zona de Perigo")
+                if st.button("🗑️ EXCLUIR USUÁRIO", type="primary"):
+                    conn = get_db_connection()
+                    cur = conn.cursor()
+                    cur.execute("DELETE FROM users WHERE username = %s", (selected_user,))
+                    conn.commit()
+                    conn.close()
+                    st.error(f"Usuário {selected_user} removido!")
+                    st.rerun()
+
+    # ABA 3: LOGS
+    with tab3:
+        st.subheader("Auditoria de Acessos")
+        if st.button("Atualizar Logs"):
+            st.rerun()
+            
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT timestamp, username, action, details FROM system_logs ORDER BY timestamp DESC LIMIT 50")
+        logs = cur.fetchall()
+        conn.close()
+        
+        # Mostra em tabela bonita
+        st.dataframe(logs, column_config={
+            0: "Data/Hora",
+            1: "Usuário",
+            2: "Ação",
+            3: "Detalhes"
+        }, use_container_width=True)
